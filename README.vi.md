@@ -2,8 +2,8 @@
 
 [English](README.md) | **Tiếng Việt**
 
-Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Viết
-bằng Rust và Win32 thuần (không Electron, không WebView). Chỉ chạy trên Windows 10/11.
+Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chỉ
+chạy trên Windows 10/11.
 
 ## Cài đặt
 
@@ -68,40 +68,29 @@ Giao diện có tiếng Anh và tiếng Việt, mặc định theo Windows; đ�
 - Không kêu và không hiện thông báo khi đang toàn màn hình, bật Focus Assist, hoặc khi bạn đang ở đúng cửa sổ của phiên đó.
 - Nhân vật có ba cỡ. Những thứ trên chỉnh trong Cài đặt.
 
-## Vì sao nhẹ
-
-- Mọi animation chỉ chuẩn bị một lần, trong một tiến trình con tự thoát, nên RAM dùng lúc giải mã được trả lại hết.
-- Khi phát, app ánh xạ file cache thay vì nạp vào RAM, nên Windows lấy lại vùng nhớ đó bất cứ lúc nào nó cần.
-- Mỗi khung hình chỉ giải nén và cập nhật đúng vùng thay đổi; khung hình không đổi thì app không cần thức dậy.
-- Nhiễu video được lọc khi chuẩn bị, nên phần đứng yên của hình không phải vẽ lại.
-- Animation dừng hẳn khi khoá máy, tắt màn hình, ẩn buddy hoặc có app toàn màn hình. Ảnh tĩnh không dùng timer.
-
 ## Mức dùng
 
 Hôm nay, tuần này (từ thứ Hai), tháng này và 14 ngày gần nhất, theo giờ máy. Số liệu đếm từ transcript trong
 `%USERPROFILE%\.claude\projects` (cả subagent), chỉ đọc các con số `usage`, không đọc nội dung hội thoại. Số lớn là
-đầu vào + đầu ra + ghi cache; đọc cache tính riêng. Đếm tăng dần trong một tiến trình ngắn ở mức ưu tiên thấp. Không gồm
-Claude dùng trên máy khác hay trên web.
+đầu vào + đầu ra + ghi cache; đọc cache tính riêng. Không gồm Claude dùng trên máy khác hay trên web.
 
 ## Nhân vật
 
-Mọi nhân vật đều dùng được ngay. Thêm từ file hoặc nhập cả thư mục cùng định dạng với bản Electron gốc (`character.json`
-và một file media cho mỗi trạng thái):
+Mọi nhân vật đều dùng được ngay. Thêm từ file hoặc nhập cả thư mục (`character.json` và một file media cho mỗi trạng
+thái):
 
 | Định dạng | Ghi chú |
 |---|---|
-| WebM VP9 có alpha | Nền trong suốt, giải mã bằng thư viện Rust kèm app |
-| MP4 | Giải mã bằng Media Foundation của Windows, không có nền trong suốt |
+| WebM VP9 có alpha | Nền trong suốt |
+| MP4 | Không có nền trong suốt |
 | PNG, APNG, GIF, WebP, JPG | Ảnh nền trắng có thể tách nền khi thêm |
 | SVG | Vẽ như ảnh tĩnh, hiệu ứng trong file không chạy |
 
-Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Mỗi file chỉ giải mã một lần rồi lưu dạng nén
-trong `cache`, nên phát lại rất nhẹ. Clip rất dài bị cắt bớt khi chuẩn bị (giới hạn 50 MB mỗi file).
+Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
 ## Cấu hình
 
-`%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329, khác cổng 47321 của bản Electron nên hai app chạy
-song song được). Đổi cổng thì cần kết nối lại Claude Code.
+`%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
 
 ## API cục bộ
 

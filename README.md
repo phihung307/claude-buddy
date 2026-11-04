@@ -3,7 +3,7 @@
 **English** | [Tiếng Việt](README.vi.md)
 
 A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
-you, done, or failed. Written in Rust on plain Win32, with no Electron and no WebView. Windows 10/11 only.
+you, done, or failed. Windows 10/11 only.
 
 ## Install
 
@@ -71,42 +71,31 @@ The interface is in English and Vietnamese. It follows Windows by default; chang
 - No sound or notification during full screen or Focus Assist, or when you're already in that session's window.
 - The character comes in three sizes. All of this can be changed in Settings.
 
-## Why it's light
-
-- Each animation is prepared once, in a child process that exits, so the memory used for decoding is all given back.
-- During playback the app maps the cache file instead of loading it into RAM, so Windows can reclaim that memory whenever
-  it needs to.
-- Each frame decompresses and updates only the area that changed; if nothing changed, the app doesn't wake up.
-- Video noise is filtered out during preparation, so still parts of the image aren't redrawn.
-- Animation stops completely when the PC is locked, the display is off, the buddy is hidden, or a full-screen app is
-  running. Still images use no timer.
-
 ## Usage
 
 Today, this week (from Monday), this month and the last 14 days, in local time. Numbers are counted from the transcripts
 in `%USERPROFILE%\.claude\projects` (subagents included), reading only the `usage` numbers and never the conversation.
-The big number is input + output + cache writes; cache reads are shown separately. Counting is incremental, in a
-short-lived low-priority process. Claude used on other machines or on the web isn't included.
+The big number is input + output + cache writes; cache reads are shown separately. Claude used on other machines or on
+the web isn't included.
 
 ## Characters
 
-Every character is available right away. Add your own from files, or import a folder in the same format as the original
-Electron app (`character.json` and one media file per state):
+Every character is available right away. Add your own from files, or import a folder (`character.json` and one media
+file per state):
 
 | Format | Notes |
 |---|---|
-| WebM VP9 with alpha | Transparent background, decoded by a Rust library built into the app |
-| MP4 | Decoded by Windows Media Foundation, no transparent background |
+| WebM VP9 with alpha | Transparent background |
+| MP4 | No transparent background |
 | PNG, APNG, GIF, WebP, JPG | White backgrounds can be removed when adding |
 | SVG | Drawn as a still image; effects in the file don't play |
 
-Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Each file is decoded once and stored compressed in
-`cache`, so replaying it is very light. Very long clips are cut during preparation (limit 50 MB per file).
+Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
+file).
 
 ## Configuration
 
-`%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329, different from the Electron app's 47321, so both can
-run side by side). After changing the port, reconnect to Claude Code.
+`%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329). After changing the port, reconnect to Claude Code.
 
 ## Local API
 

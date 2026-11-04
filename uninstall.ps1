@@ -19,6 +19,8 @@ if (Test-Path -LiteralPath $Exe) {
     Remove-Item -LiteralPath $Dir -Recurse -Force
 }
 Remove-Item -LiteralPath $Shortcut -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "HKCU:\Software\Classes\.buddy" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "HKCU:\Software\Classes\ClaudeBuddy.Character" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "ClaudeBuddyRS" -ErrorAction SilentlyContinue
 
 if ($env:CLAUDE_BUDDY_PURGE -eq "1") {

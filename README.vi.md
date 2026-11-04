@@ -88,6 +88,26 @@ thái):
 
 Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
+## Tạo nhân vật bằng Codex
+
+Nếu máy đã cài và đăng nhập [Codex](https://openai.com/codex/), bấm **Tạo bằng Codex** ở trang Nhân vật rồi mô tả nhân vật
+bạn muốn. Mất khoảng 6 đến 10 phút và dùng hạn mức Codex của bạn. Bạn sẽ có đủ 5 trạng thái dạng ảnh động, và có thể làm việc
+khác trong lúc chờ, miễn là không đóng cửa sổ app. Codex chỉ vẽ, còn app tự kiểm tra và cắt ảnh.
+
+Muốn đổi sau này, chọn nhân vật, bấm **Sửa bằng Codex…** rồi nói bạn muốn đổi gì, ví dụ "đội thêm mũ đỏ". Codex tiếp tục đúng
+cuộc trò chuyện đã vẽ nhân vật và vẽ lại đủ 5 trạng thái. Nhân vật chỉ thay đổi khi đã xong cả 5.
+
+Không có Codex? Gõ mô tả, bấm **Sao chép prompt cho ChatGPT**, dán vào ChatGPT, rồi kéo file zip nhận được vào cửa sổ app.
+
+## Chia sẻ nhân vật
+
+Chọn một nhân vật bạn đã thêm rồi bấm **Chia sẻ** để lưu thành một file `.buddy`, sau đó gửi file này cho bất kỳ ai. Để
+thêm nhân vật người khác gửi, bấm đúp vào file hoặc kéo vào cửa sổ app, không cần khởi động lại. Nếu đã có nhân vật trùng
+tên, app giữ cả hai.
+
+File `.buddy` chỉ chứa ảnh, video, âm thanh và phần mô tả. App không chạy bất cứ thứ gì trong file, và từ chối file có nội
+dung khác.
+
 ## Cấu hình
 
 `%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.

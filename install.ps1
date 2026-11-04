@@ -46,6 +46,16 @@ $Link.TargetPath = $Exe
 $Link.WorkingDirectory = $Dir
 $Link.Save()
 
+# Per user, so no admin rights: .buddy files open in the app.
+$Type = "HKCU:\Software\Classes\ClaudeBuddy.Character"
+New-Item -Path "HKCU:\Software\Classes\.buddy" -Force | Out-Null
+Set-Item -Path "HKCU:\Software\Classes\.buddy" -Value "ClaudeBuddy.Character"
+New-Item -Path "$Type\DefaultIcon" -Force | Out-Null
+Set-Item -Path $Type -Value "Claude Buddy character"
+Set-Item -Path "$Type\DefaultIcon" -Value "`"$Exe`",0"
+New-Item -Path "$Type\shell\open\command" -Force | Out-Null
+Set-Item -Path "$Type\shell\open\command" -Value "`"$Exe`" `"%1`""
+
 if ($env:CLAUDE_BUDDY_NO_HOOKS -eq "1") {
     Write-Host "Skipped connecting to Claude Code. The app will ask when it starts."
 } else {

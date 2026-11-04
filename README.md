@@ -93,6 +93,28 @@ file per state):
 Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
 file).
 
+## Creating a character with Codex
+
+If [Codex](https://openai.com/codex/) is installed and signed in on this PC, click **Create with Codex** on the Characters
+page and describe the character you want. It takes about 6 to 10 minutes and uses your Codex quota. You get all five states
+as animations, and you can keep working in the meantime as long as the app's window stays open. Codex only draws: the app
+checks and cuts the images itself.
+
+To change it later, select it and click **Edit with Codex…**, then say what should change, such as "add a red hat". Codex
+continues the conversation that drew it and redraws all five states. The character only changes once they're all done.
+
+No Codex? Type your description and click **Copy prompt for ChatGPT**, paste it into ChatGPT, then drag the ZIP it gives you
+onto the app window.
+
+## Sharing characters
+
+Select a character you added and click **Share** to save it as one `.buddy` file, then send that file to anyone. To add
+a character someone sent you, double-click the file or drag it onto the app window, with no restart. If a character with
+that name already exists, both are kept.
+
+A `.buddy` file only holds images, video, sound and a description. Nothing in it is ever run, and files with other
+content are refused.
+
 ## Configuration
 
 `%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329). After changing the port, reconnect to Claude Code.

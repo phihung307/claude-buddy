@@ -18,7 +18,9 @@ use crate::sound;
 use crate::store::{self, name_of, status_of, detail_of, Session, State};
 use crate::usage;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -31,6 +33,7 @@ use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION};
+use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
@@ -44,6 +47,9 @@ const WM_FIRST_RUN: u32 = WM_APP + 4;
 const WM_ANIM_READY: u32 = WM_APP + 5;
 const WM_OPEN_PICKER: u32 = WM_APP + 6;
 const WM_RESTORE_FOCUS: u32 = WM_APP + 7;
+const WM_IMPORT_PACKS: u32 = WM_APP + 8;
+/// Marks a WM_COPYDATA as a .buddy path from a second copy of the app.
+const COPYDATA_PACK: usize = 0xB0DD_1E01;
 // Not exposed by the windows-sys features this app enables.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const NIN_KEYSELECT: u32 = WM_USER + 1;
@@ -1239,6 +1245,28 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             picker::open(wp as u8);
             0
         }
+        WM_COPYDATA => {
+            let data = &*(lp as *const COPYDATASTRUCT);
+            if data.dwData != COPYDATA_PACK || data.lpData.is_null() || data.cbData % 2 != 0 {
+                return 0;
+            }
+            let text = std::slice::from_raw_parts(data.lpData as *const u16, data.cbData as usize / 2);
+            let path = PathBuf::from(OsString::from_wide(text));
+            if !picker::is_pack(&path) {
+                return 0;
+            }
+            // Posted: the other copy is waiting for this to return, and importing can show a dialog.
+            PENDING_PACKS.lock().unwrap().push(path);
+            PostMessageW(hwnd, WM_IMPORT_PACKS, 0, 0);
+            1
+        }
+        WM_IMPORT_PACKS => {
+            let packs = std::mem::take(&mut *PENDING_PACKS.lock().unwrap());
+            for pack in &packs {
+                picker::import_pack(pack);
+            }
+            0
+        }
         WM_DESTROY => {
             with_app(|a| {
                 let mut n = a.tray;
@@ -1308,6 +1336,37 @@ fn make_icon(state: State, size: u32) -> HICON {
     }
 }
 
+/// A .buddy file opened from Explorer arrives as the first argument.
+fn pack_argument() -> Option<PathBuf> {
+    std::env::args_os().nth(1).map(PathBuf::from).filter(|p| picker::is_pack(p))
+}
+
+static PENDING_PACKS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// A copy with its own data folder is a separate install, so its window has to be told apart: a file must
+/// reach the copy it was meant for, and never add a character to another one's data.
+fn instance_title() -> Vec<u16> {
+    match std::env::var("CLAUDE_BUDDY_RS_HOME") {
+        Ok(home) => wide(&format!("Claude Buddy {home}")),
+        Err(_) => wide("Claude Buddy"),
+    }
+}
+
+/// Hands a file to the copy that's already running, and lets it come to the front to show the result.
+unsafe fn forward_pack(path: &Path) {
+    let target = FindWindowW(w!("ClaudeBuddyRS"), instance_title().as_ptr());
+    if target.is_null() {
+        return;
+    }
+    let text: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut owner = 0;
+    GetWindowThreadProcessId(target, &mut owner);
+    AllowSetForegroundWindow(owner);
+    let data = COPYDATASTRUCT { dwData: COPYDATA_PACK, cbData: (text.len() * 2) as u32, lpData: text.as_ptr() as *mut _ };
+    let mut result = 0;
+    SendMessageTimeoutW(target, WM_COPYDATA, 0, &data as *const _ as LPARAM, SMTO_ABORTIFHUNG, 5000, &mut result);
+}
+
 pub fn run() {
     unsafe {
         // The file and folder pickers are COM dialogs.
@@ -1321,6 +1380,9 @@ pub fn run() {
         };
         CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            if let Some(pack) = pack_argument() {
+                forward_pack(&pack);
+            }
             return;
         }
     }
@@ -1347,7 +1409,7 @@ pub fn run() {
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             class,
-            w!("Claude Buddy"),
+            instance_title().as_ptr(),
             WS_POPUP,
             0,
             0,
@@ -1439,6 +1501,10 @@ pub fn run() {
         usage::request_scan(shared.clone());
         if ask_hooks {
             PostMessageW(hwnd, WM_FIRST_RUN, 0, 0);
+        }
+        if let Some(pack) = pack_argument() {
+            PENDING_PACKS.lock().unwrap().push(pack);
+            PostMessageW(hwnd, WM_IMPORT_PACKS, 0, 0);
         }
 
         let mut msg: MSG = std::mem::zeroed();

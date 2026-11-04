@@ -1,6 +1,6 @@
 [package]
 name = "claude-buddy-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight native desktop companion that shows Claude Code session status"
 license = "MIT"
@@ -16,6 +16,10 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 # Character media. Everything is decoded once on a worker thread, then played from a compressed cache.
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memchr = "2"
+# Writes generated characters as animated PNG.
+png = "0.18"
+# Characters made in ChatGPT arrive as a ZIP.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 resvg = { version = "0.49", default-features = false }
 vp9dec = "0.1"
@@ -32,7 +36,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Power",

@@ -9,6 +9,7 @@ use crate::server::now_ms;
 use crate::store::State;
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const STATES: [State; 5] = [State::Idle, State::Working, State::Waiting, State::Done, State::Error];
@@ -521,7 +522,12 @@ fn unique_id(user_root: &Path, base: &str, is_taken: &dyn Fn(&str) -> bool) -> S
 /// Copies an existing character folder in under a free id. Returns the new id.
 pub fn import_dir(src: &Path, user_root: &Path, is_taken: &dyn Fn(&str) -> bool) -> Result<String, String> {
     let c = load_dir(src)?;
-    let id = unique_id(user_root, &c.id, is_taken);
+    // The id becomes a folder name, and it was written by whoever made this character.
+    let base = match slugify(&c.id) {
+        s if s.is_empty() => "character".to_string(),
+        s => s,
+    };
+    let id = unique_id(user_root, &base, is_taken);
     let staging = fresh_staging(user_root, &format!(".importing-{id}"))?;
     let result = (|| {
         copy_tree(src, &staging, 0)?;
@@ -543,6 +549,156 @@ pub fn import_dir(src: &Path, user_root: &Path, is_taken: &dyn Fn(&str) -> bool)
         let _ = fs::remove_dir_all(&staging);
     }
     result.map(|()| id)
+}
+
+// ---- .buddy files: one character in one file, to pass on to someone else ----
+//
+// The magic, the number of files, then for each file its name's length (u16) and name, its size (u64) and its
+// bytes, all little-endian. Nothing is compressed, since the media already is, so a small file can't unpack
+// into a huge one. A file from a stranger can only ever add a character: names and types are checked on the way
+// in, and nothing in it is ever run.
+
+const PACK_MAGIC: &[u8; 8] = b"CBUDDY1\n";
+const MAX_PACK_FILES: usize = 64;
+const MAX_PACK_BYTES: u64 = 400 * 1024 * 1024;
+const MAX_PACK_DEPTH: usize = 3;
+const PACK_TYPES: [&str; 12] = ["json", "webm", "mp4", "png", "apng", "gif", "webp", "svg", "jpg", "jpeg", "wav", "mp3"];
+
+pub const PACK_EXTENSION: &str = "buddy";
+
+/// A relative path with forward slashes that can only name something inside the folder it's unpacked into.
+fn pack_name_ok(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('/').collect();
+    let reserved = |part: &str| {
+        let stem = part.split('.').next().unwrap_or("").to_ascii_lowercase();
+        let numbered = |prefix: &str| stem.strip_prefix(prefix).is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit());
+        matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") || numbered("com") || numbered("lpt")
+    };
+    let part_ok = |part: &&str| {
+        !part.is_empty()
+            && !part.starts_with(['.', ' '])
+            && !part.ends_with(['.', ' '])
+            && !part.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*'))
+            && !reserved(part)
+    };
+    let known_type = name.rsplit_once('.').is_some_and(|(_, ext)| PACK_TYPES.contains(&ext.to_ascii_lowercase().as_str()));
+    parts.len() <= MAX_PACK_DEPTH && parts.iter().all(part_ok) && known_type
+}
+
+fn pack_files(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<(String, PathBuf, u64)>) -> Result<(), String> {
+    for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let Ok(kind) = e.file_type() else { continue };
+        let name = format!("{prefix}{}", e.file_name().to_string_lossy());
+        if kind.is_dir() && depth + 1 < MAX_PACK_DEPTH {
+            pack_files(&e.path(), &format!("{name}/"), depth + 1, out)?;
+        } else if kind.is_file() && name != "thumb.png" && pack_name_ok(&name) {
+            out.push((name, e.path(), e.metadata().map_err(|e| e.to_string())?.len()));
+        }
+    }
+    Ok(())
+}
+
+/// Saves a character of yours as one file.
+pub fn export_pack(c: &Character, dest: &Path) -> Result<(), String> {
+    let dir = c.dir().ok_or(t("Nhân vật có sẵn của app không chia sẻ được.", "Built-in characters can't be shared."))?;
+    let mut files = Vec::new();
+    pack_files(dir, "", 0, &mut files)?;
+    if files.len() > MAX_PACK_FILES || files.iter().map(|f| f.2).sum::<u64>() > MAX_PACK_BYTES {
+        return Err(t("Nhân vật này quá lớn để chia sẻ.", "This character is too large to share.").into());
+    }
+    let temp = dest.with_extension("buddy-tmp");
+    let written = (|| -> std::io::Result<()> {
+        let mut w = std::io::BufWriter::new(fs::File::create(&temp)?);
+        w.write_all(PACK_MAGIC)?;
+        w.write_all(&(files.len() as u32).to_le_bytes())?;
+        for (name, path, size) in &files {
+            w.write_all(&(name.len() as u16).to_le_bytes())?;
+            w.write_all(name.as_bytes())?;
+            w.write_all(&size.to_le_bytes())?;
+            let copied = std::io::copy(&mut fs::File::open(path)?, &mut w)?;
+            if copied != *size {
+                return Err(std::io::Error::other("file changed while reading"));
+            }
+        }
+        w.flush()
+    })();
+    let result = written.and_then(|()| fs::rename(&temp, dest)).map_err(|e| e.to_string());
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn unpack(file: &Path, into: &Path) -> Result<(), String> {
+    let bad = || t("File này không phải nhân vật Claude Buddy hợp lệ.", "This isn't a valid Claude Buddy character file.").to_string();
+    let f = fs::File::open(file).map_err(|e| e.to_string())?;
+    let total = f.metadata().map_err(|e| e.to_string())?.len();
+    if total > MAX_PACK_BYTES + 1024 * 1024 {
+        return Err(t("File nhân vật quá lớn.", "The character file is too large.").into());
+    }
+    let mut r = std::io::BufReader::new(f);
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic).map_err(|_| bad())?;
+    if &magic != PACK_MAGIC {
+        return Err(bad());
+    }
+    let mut word = [0u8; 4];
+    r.read_exact(&mut word).map_err(|_| bad())?;
+    let count = u32::from_le_bytes(word) as usize;
+    if count == 0 || count > MAX_PACK_FILES {
+        return Err(bad());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut left = total;
+    for _ in 0..count {
+        let mut short = [0u8; 2];
+        r.read_exact(&mut short).map_err(|_| bad())?;
+        let mut name = vec![0u8; u16::from_le_bytes(short).min(1024) as usize];
+        r.read_exact(&mut name).map_err(|_| bad())?;
+        let name = String::from_utf8(name).map_err(|_| bad())?;
+        // Windows file names ignore case, so two spellings would be one file.
+        if !pack_name_ok(&name) || !seen.insert(name.to_lowercase()) {
+            return Err(bad());
+        }
+        let mut long = [0u8; 8];
+        r.read_exact(&mut long).map_err(|_| bad())?;
+        let size = u64::from_le_bytes(long);
+        // A size claiming more than the file holds is refused before anything is written.
+        left = left.checked_sub(size).ok_or_else(bad)?;
+        let target = into.join(&name);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut out = fs::File::create(&target).map_err(|e| e.to_string())?;
+        let copied = std::io::copy(&mut (&mut r).take(size), &mut out).map_err(|e| e.to_string())?;
+        if copied != size {
+            return Err(bad());
+        }
+    }
+    let mut rest = [0u8; 1];
+    if r.read(&mut rest).map_err(|e| e.to_string())? != 0 || !seen.contains("character.json") {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// Adds the character in a .buddy file under a free id, keeping any character it would clash with.
+pub fn import_pack(file: &Path, user_root: &Path, is_taken: &dyn Fn(&str) -> bool) -> Result<String, String> {
+    let staging = fresh_staging(user_root, ".unpacking")?;
+    let result = unpack(file, &staging).and_then(|()| {
+        // Without an id of its own it would be named after this temporary folder.
+        let manifest = staging.join("character.json");
+        let text = fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
+        let mut raw: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string())?;
+        if raw.get("id").and_then(Value::as_str).is_none_or(|id| slugify(id).is_empty()) {
+            let from_name = raw.get("name").and_then(Value::as_str).map(slugify).unwrap_or_default();
+            raw["id"] = json!(if from_name.is_empty() { "character".to_string() } else { from_name });
+            fs::write(&manifest, serde_json::to_string_pretty(&raw).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        }
+        import_dir(&staging, user_root, is_taken)
+    });
+    let _ = fs::remove_dir_all(&staging);
+    result
 }
 
 /// Guesses a state from a file name when several files are dropped together.
@@ -577,6 +733,149 @@ pub fn manifest_preview(draft: &Draft, id: &str, exts: &[Option<String>; 5], kin
     let mut m = json!({ "schema": 1, "id": id, "name": draft.name.trim(), "scale": clamp_scale(draft.scale) });
     m["states"] = Value::Object(states);
     serde_json::to_string_pretty(&m).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new(name: &str) -> Temp {
+            let d = std::env::temp_dir().join(format!("buddy-pack-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&d);
+            fs::create_dir_all(&d).unwrap();
+            Temp(d)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn character(root: &Path, id: &str) -> Character {
+        let dir = root.join(id);
+        fs::create_dir_all(dir.join("sounds")).unwrap();
+        fs::write(dir.join("idle.png"), png_bytes()).unwrap();
+        fs::write(dir.join("thumb.png"), png_bytes()).unwrap();
+        fs::write(dir.join("sounds/done.wav"), b"RIFF").unwrap();
+        fs::write(dir.join("character.json"), format!(r#"{{"schema":1,"id":"{id}","name":"Cáo Robot","states":{{"idle":{{"file":"idle.png","kind":"static"}}}}}}"#)).unwrap();
+        load_dir(&dir).unwrap()
+    }
+
+    /// A pack written by hand, for files the app would never make itself.
+    fn raw_pack(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut o = PACK_MAGIC.to_vec();
+        o.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        for (name, data) in files {
+            o.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            o.extend_from_slice(name.as_bytes());
+            o.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            o.extend_from_slice(data);
+        }
+        o
+    }
+
+    #[test]
+    fn a_character_survives_the_trip_to_someone_else() {
+        let (mine, theirs) = (Temp::new("mine"), Temp::new("theirs"));
+        let c = character(&mine.0, "cao-robot");
+        let file = mine.0.join("cao.buddy");
+        export_pack(&c, &file).unwrap();
+        let id = import_pack(&file, &theirs.0, &|_| false).unwrap();
+        assert_eq!(id, "cao-robot");
+        let got = load_dir(&theirs.0.join(&id)).unwrap();
+        assert_eq!(got.name, "Cáo Robot");
+        assert_eq!(fs::read(theirs.0.join(&id).join("idle.png")).unwrap(), png_bytes());
+        assert!(theirs.0.join(&id).join("sounds/done.wav").exists());
+        assert!(!theirs.0.join(&id).join("thumb.png").exists(), "made again locally");
+        assert!(!theirs.0.join(".unpacking").exists(), "nothing left behind");
+    }
+
+    #[test]
+    fn importing_twice_keeps_both() {
+        let (mine, theirs) = (Temp::new("twice-a"), Temp::new("twice-b"));
+        let file = mine.0.join("a.buddy");
+        export_pack(&character(&mine.0, "cao"), &file).unwrap();
+        assert_eq!(import_pack(&file, &theirs.0, &|_| false).unwrap(), "cao");
+        assert_eq!(import_pack(&file, &theirs.0, &|_| false).unwrap(), "cao-2");
+    }
+
+    #[test]
+    fn built_in_characters_cant_be_exported() {
+        let t = Temp::new("builtin");
+        assert!(export_pack(&vector_character(0), &t.0.join("x.buddy")).is_err());
+        assert!(!t.0.join("x.buddy").exists());
+    }
+
+    #[test]
+    fn names_can_only_point_inside_the_folder() {
+        for bad in ["../evil.png", "..\\evil.png", "a/../../evil.png", "C:/evil.png", "/evil.png", "a//b.png", ".hidden.png", "CON.png", "lpt1.png", "evil.png ", "a/b/c/d.png", "evil.exe", "evil.ps1", "noextension", "x?.png", ""] {
+            assert!(!pack_name_ok(bad), "{bad:?}");
+        }
+        for good in ["character.json", "idle.webm", "sounds/done.wav", "Cáo Robot.PNG", "console.png"] {
+            assert!(pack_name_ok(good), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_file_adds_nothing_and_writes_nowhere_else() {
+        let t = Temp::new("hostile");
+        let root = t.0.join("characters");
+        fs::create_dir_all(&root).unwrap();
+        let json: &[u8] = br#"{"name":"x","states":{"idle":{"file":"idle.png","kind":"static"}}}"#;
+        let png = png_bytes();
+        let mut oversized = raw_pack(&[("character.json", json)]);
+        let at = PACK_MAGIC.len() + 4 + 2 + "character.json".len();
+        oversized[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut too_many = PACK_MAGIC.to_vec();
+        too_many.extend_from_slice(&u32::MAX.to_le_bytes());
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"PK\x03\x04 a zip file".to_vec(),
+            raw_pack(&[]),
+            raw_pack(&[("idle.png", &png)]),
+            raw_pack(&[("character.json", json), ("../evil.png", &png)]),
+            raw_pack(&[("character.json", json), ("evil.exe", &png)]),
+            raw_pack(&[("character.json", json), ("IDLE.png", &png), ("idle.png", &png)]),
+            raw_pack(&[("character.json", b"not json")]),
+            raw_pack(&[("character.json", json)]),
+            oversized,
+            too_many,
+            { let mut extra = raw_pack(&[("character.json", json), ("idle.png", &png)]); extra.push(0); extra },
+            { let whole = raw_pack(&[("character.json", json), ("idle.png", &png)]); whole[..whole.len() - 3].to_vec() },
+        ];
+        for (i, bytes) in cases.iter().enumerate() {
+            let file = t.0.join("bad.buddy");
+            fs::write(&file, bytes).unwrap();
+            assert!(import_pack(&file, &root, &|_| false).is_err(), "case {i}");
+            assert!(fs::read_dir(&root).unwrap().next().is_none(), "case {i} left something behind");
+            assert!(!t.0.join("evil.png").exists(), "case {i} escaped");
+        }
+    }
+
+    #[test]
+    fn an_id_cant_become_a_path() {
+        let t = Temp::new("id");
+        let root = t.0.join("characters");
+        fs::create_dir_all(&root).unwrap();
+        let png = png_bytes();
+        for evil in ["../../evil", "..\\..\\evil", "C:\\evil"] {
+            let json = serde_json::to_vec(&json!({"id": evil, "name": "x", "states": {"idle": {"file": "idle.png", "kind": "static"}}})).unwrap();
+            let file = t.0.join("id.buddy");
+            fs::write(&file, raw_pack(&[("character.json", &json), ("idle.png", &png)])).unwrap();
+            let id = import_pack(&file, &root, &|_| false).unwrap();
+            assert!(root.join(&id).join("idle.png").exists(), "{evil} stayed inside as {id}");
+            assert!(!t.0.join("evil").exists());
+        }
+    }
 }
 
 #[cfg(test)]

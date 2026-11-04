@@ -18,7 +18,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::fs;
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows_sys::Win32::Foundation::GlobalFree;
+use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tiny_skia::{FillRule, PixmapMut, Transform};
@@ -38,6 +42,13 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const EN_CHANGE: u32 = 0x0300;
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const ID_NAME: usize = 201;
+const ID_PROMPT: usize = 202;
+const CF_UNICODETEXT: u32 = 13;
+const ES_MULTILINE: u32 = 0x0004;
+const ES_AUTOVSCROLL: u32 = 0x0040;
+const ES_WANTRETURN: u32 = 0x1000;
+const GENERATE_W: f32 = 620.0;
+const GENERATE_H: f32 = 320.0;
 const TIMER_PREVIEW: usize = 1;
 const PREVIEW_FRAME_MS: u32 = 33;
 const TOAST_MS: u64 = 2600;
@@ -46,7 +57,7 @@ const PAGE_USAGE: u8 = 1;
 const PAGE_SETTINGS: u8 = 2;
 const CHART_DAYS: i64 = 14;
 /// Short on purpose: all of these sit beside the main button in the space next to the preview.
-const HERO_ACTIONS: [[&str; 3]; 2] = [["Sửa", "Thư mục", "Xoá"], ["Edit", "Folder", "Delete"]];
+const HERO_ACTIONS: [[&str; 3]; 2] = [["Sửa", "Chia sẻ", "Xoá"], ["Edit", "Share", "Delete"]];
 
 fn hero_actions() -> [&'static str; 3] {
     HERO_ACTIONS[if crate::i18n::vi() { 0 } else { 1 }]
@@ -59,9 +70,11 @@ const DIALOG_H: f32 = 510.0;
 const ICON_CHARACTERS: &str = "\u{E77B}";
 const ICON_USAGE: &str = "\u{E9D2}";
 const ICON_ADD: &str = "\u{E710}";
+const ICON_GENERATE: &str = "\u{E945}";
 const ICON_EDIT: &str = "\u{E70F}";
 const ICON_FOLDER: &str = "\u{E838}";
 const ICON_DELETE: &str = "\u{E74D}";
+const ICON_SHARE: &str = "\u{E72D}";
 const ICON_CLOSE: &str = "\u{E711}";
 const ICON_ACCEPT: &str = "\u{E73E}";
 const ICON_SETTINGS: &str = "\u{E713}";
@@ -83,6 +96,8 @@ enum JobResult {
     Preview { token: u64, id: String, result: Result<Arc<CharAnim>, String> },
     SlotInfo { token: u64, index: usize, info: Result<library::FileInfo, String>, thumb: Option<Vec<u8>> },
     Saved { result: Result<(String, Option<String>), String> },
+    Generated { result: Result<String, String> },
+    Zipped { result: Result<String, String> },
 }
 
 static RESULTS: Mutex<Vec<JobResult>> = Mutex::new(Vec::new());
@@ -108,11 +123,17 @@ enum Action {
     Select(String),
     Use,
     Edit,
-    OpenFolder,
+    Share,
     Remove,
     Tab(usize),
     Sort(bool),
     Add,
+    Generate,
+    GenStart,
+    GenStop,
+    GenClose,
+    GenCopy,
+    Redraw,
     Page(u8),
     Set(Setting),
     /// Hovering a day in the usage chart.
@@ -149,6 +170,21 @@ struct SlotView {
     thumb: Option<Vec<u8>>,
     /// Ready to save: inspected and accepted.
     ready: bool,
+}
+
+/// The "describe a character" window, and Codex working on it.
+struct Generating {
+    running: bool,
+    error: String,
+    started: std::time::Instant,
+    done: Arc<AtomicUsize>,
+    cancel: Arc<AtomicBool>,
+    /// What's on screen, to redraw only when it changes.
+    shown: (usize, u64),
+    /// Redrawing this character, instead of creating a new one.
+    redrawing: Option<Character>,
+    /// A line of good news, such as the prompt having been copied.
+    info: String,
 }
 
 struct Dialog {
@@ -206,6 +242,8 @@ struct Picker {
     toast: Option<(String, u64)>,
     dialog: Option<Dialog>,
     edit_name: HWND,
+    edit_prompt: HWND,
+    generating: Option<Generating>,
     edit_font: HFONT,
     edit_brush: HBRUSH,
     dragging_scale: bool,
@@ -339,6 +377,8 @@ pub fn open(page: u8) {
         };
         let edit_name = make_edit(ID_NAME, ES_AUTOHSCROLL);
         SendMessageW(edit_name, 0x00C5 /* EM_LIMITTEXT */, 60, 0);
+        let edit_prompt = make_edit(ID_PROMPT, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL);
+        SendMessageW(edit_prompt, 0x00C5 /* EM_LIMITTEXT */, crate::codex::MAX_DESCRIPTION, 0);
 
         let selected = snapshot.current.clone();
         let picker = Picker {
@@ -371,6 +411,8 @@ pub fn open(page: u8) {
             state_since: Instant::now(),
             toast: None,
             dialog: None,
+            edit_prompt,
+            generating: None,
             edit_name,
             edit_font,
             edit_brush: CreateSolidBrush(colorref(pal().surface)),
@@ -546,6 +588,12 @@ impl Picker {
             hits.clear(); // everything behind a modal dialog is out of reach
             g.solid_cards = true;
             self.paint_dialog(&mut g, lw, lh, &mut hits);
+            g.solid_cards = false;
+        }
+        if self.generating.is_some() {
+            hits.clear();
+            g.solid_cards = true;
+            self.paint_generate(&mut g, lw, lh, &mut hits);
             g.solid_cards = false;
         }
         if let Some((msg, until)) = &self.toast {
@@ -773,6 +821,11 @@ impl Picker {
             (false, false) => crate::tf!("Do bạn thêm · tác giả {}", "Added by you · by {}", c.author),
         };
         g.label(ix, y, iw, 18.0, &meta, Font::Small, pal().muted);
+        if !c.is_builtin() && generated_dir(&c.id).join("idle.png").is_file() {
+            let link = t("Sửa bằng Codex…", "Edit with Codex…");
+            let (lx, lw) = (ix + g.text_w(&meta, Font::Small) + 18.0, g.text_w(link, Font::Small) + 4.0);
+            g.link(lx, y, lw, link, Action::Redraw, &hover, hits);
+        }
         y += 28.0;
         // These rows choose what the preview beside them shows.
         g.label(ix, y, iw, 18.0, t("Xem thử trạng thái", "Preview states"), Font::Small, pal().muted);
@@ -810,7 +863,7 @@ impl Picker {
         x = g.button(x, by2, use_icon, use_label, Style::Primary, !in_use, Action::Use, &hover, hits) + 8.0;
         if !c.is_builtin() {
             x = g.button(x, by2, Some(ICON_EDIT), hero_actions()[0], Style::Normal, true, Action::Edit, &hover, hits) + 8.0;
-            x = g.button(x, by2, Some(ICON_FOLDER), hero_actions()[1], Style::Normal, true, Action::OpenFolder, &hover, hits) + 8.0;
+            x = g.button(x, by2, Some(ICON_SHARE), hero_actions()[1], Style::Normal, true, Action::Share, &hover, hits) + 8.0;
             if !in_use {
                 g.button(x, by2, Some(ICON_DELETE), hero_actions()[2], Style::Danger, true, Action::Remove, &hover, hits);
             }
@@ -888,7 +941,7 @@ impl Picker {
 
     fn clamp_scroll(&mut self) {
         let (lw, lh) = self.logical();
-        let (_, content) = self.grid_metrics(lw - SIDEBAR_W, self.characters.len());
+        let (_, content) = self.grid_metrics(lw - SIDEBAR_W, self.characters.len() + 1);
         let view = lh - GRID_TOP - 8.0;
         self.scroll = self.scroll.clamp(0.0, (content - view).max(0.0));
     }
@@ -896,16 +949,16 @@ impl Picker {
     fn paint_grid(&mut self, g: &mut Gfx, lw: f32, lh: f32, hits: &mut Vec<Hit>) {
         self.clamp_scroll();
         // Thin scroll indicator when not everything fits, as Windows 11 lists have
-        let (_, content_h) = self.grid_metrics(lw, self.characters.len());
+        let (_, content_h) = self.grid_metrics(lw, self.characters.len() + 1);
         let view_h = lh - GRID_TOP - 8.0;
         let scroll_marker = (content_h > view_h).then(|| {
             let th = (view_h * view_h / content_h).max(24.0);
             (GRID_TOP + self.scroll / (content_h - view_h) * (view_h - th), th)
         });
         let list = self.sorted();
-        let (cols, _) = self.grid_metrics(lw, list.len());
+        let (cols, _) = self.grid_metrics(lw, list.len() + 1);
         let hover = self.hover.clone();
-        let total = list.len() + 1;
+        let total = list.len() + 2;
         for n in 0..total {
             let (row, col) = (n / cols, n % cols);
             let x = 16.0 + col as f32 * (CARD_W + GRID_GAP);
@@ -922,6 +975,16 @@ impl Picker {
                 g.center(x, y + 76.0, CARD_W, 20.0, t("Thêm nhân vật", "Add character"), Font::Bold, pal().ink);
                 g.center(x, y + 96.0, CARD_W, 18.0, t("hoặc thả file vào", "or drop files here"), Font::Small, pal().muted);
                 hits.push(Hit { rect: (x, y, CARD_W, CARD_H), action: Action::Add });
+                continue;
+            }
+            if n == list.len() + 1 {
+                let hot = hover == Some(Action::Generate);
+                g.rrect(x, y, CARD_W, CARD_H, 8.0, if hot { pal().hover } else { pal().surface });
+                g.stroke_rrect(x, y, CARD_W, CARD_H, 8.0, pal().stroke, 1.0);
+                g.icon(x, y + 36.0, CARD_W, 36.0, ICON_GENERATE, pal().accent);
+                g.center(x, y + 76.0, CARD_W, 20.0, t("Tạo bằng Codex", "Create with Codex"), Font::Bold, pal().ink);
+                g.center(x, y + 96.0, CARD_W, 18.0, t("từ mô tả của bạn", "from your description"), Font::Small, pal().muted);
+                hits.push(Hit { rect: (x, y, CARD_W, CARD_H), action: Action::Generate });
                 continue;
             }
             let c = &list[n];
@@ -952,6 +1015,147 @@ impl Picker {
         if let Some((ty, th)) = scroll_marker {
             g.rrect(lw - 7.0, ty, 3.0, th, 1.5, pal().muted);
         }
+    }
+
+    fn paint_generate(&mut self, g: &mut Gfx, lw: f32, lh: f32, hits: &mut Vec<Hit>) {
+        g.rect_a(0.0, 0.0, lw, lh, 0x000000, 0.4);
+        let (dw, dh) = (GENERATE_W.min(lw - 32.0), GENERATE_H.min(lh - 32.0));
+        let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
+        g.rrect(dx, dy, dw, dh, 8.0, pal().surface);
+        g.stroke_rrect(dx, dy, dw, dh, 8.0, pal().stroke, 1.0);
+        let hover = self.hover.clone();
+        let Some(gen) = self.generating.as_ref() else { return };
+        let (running, error, info) = (gen.running, gen.error.clone(), gen.info.clone());
+        let (done, minutes) = (gen.done.load(Ordering::Relaxed), gen.started.elapsed().as_secs() / 60);
+        let redrawing = gen.redrawing.as_ref().map(|c| c.name.clone());
+        let title = match &redrawing {
+            Some(name) => crate::tf!("Sửa {name} bằng Codex", "Edit {name} with Codex"),
+            None => t("Tạo nhân vật bằng Codex", "Create a character with Codex").to_string(),
+        };
+        g.label(dx + 18.0, dy + 12.0, dw - 70.0, 28.0, &title, Font::Title, pal().ink);
+        let (bx, by) = (dx + dw - 18.0, dy + dh - 50.0);
+        if running {
+            g.label(dx + 18.0, dy + 70.0, dw - 36.0, 22.0, &crate::tf!("Codex đang vẽ: xong {done}/5 ảnh · {minutes} phút", "Codex is drawing: {done} of 5 images · {minutes} min"), Font::Bold, pal().ink);
+            let bar = dw - 36.0;
+            g.rrect(dx + 18.0, dy + 102.0, bar, 6.0, 3.0, pal().stroke);
+            g.rrect(dx + 18.0, dy + 102.0, (bar * (done as f32 + 0.3) / 5.0).min(bar), 6.0, 3.0, pal().accent);
+            g.label(dx + 18.0, dy + 122.0, dw - 36.0, 18.0, t("Thường mất 6 đến 10 phút. Bạn cứ làm việc khác, nhưng đừng đóng cửa sổ này.", "Usually takes 6 to 10 minutes. Carry on with other work, but keep this window open."), Font::Small, pal().muted);
+            let w = g.button_w(None, t("Huỷ", "Cancel"));
+            g.button(bx - w, by, None, t("Huỷ", "Cancel"), Style::Normal, true, Action::GenStop, &hover, hits);
+            return;
+        }
+        let close = (dx + dw - 40.0, dy + 10.0, 28.0, 28.0);
+        if hover == Some(Action::GenClose) {
+            g.rrect(close.0, close.1, close.2, close.3, 4.0, pal().hover);
+        }
+        g.icon(close.0, close.1, close.2, close.3, ICON_CLOSE, pal().ink);
+        hits.push(Hit { rect: close, action: Action::GenClose });
+        let (heading, example) = if redrawing.is_some() {
+            (t("Bạn muốn đổi gì?", "What should change?"), t("Ví dụ: đội thêm mũ đỏ, tai to hơn, đổi áo sang màu xanh", "For example: add a red hat, bigger ears, make the suit blue"))
+        } else {
+            (t("Mô tả nhân vật bạn muốn", "Describe the character you want"), t("Ví dụ: chú mèo phi hành gia tròn trịa, mặc áo đỏ, tính cách vui vẻ", "For example: a round astronaut cat in a red suit, cheerful"))
+        };
+        g.label(dx + 18.0, dy + 46.0, dw - 36.0, 20.0, heading, Font::Bold, pal().ink);
+        g.label(dx + 18.0, dy + 66.0, dw - 36.0, 18.0, example, Font::Small, pal().muted);
+        // The text box itself is placed in place_edits().
+        let focused = unsafe { GetFocus() } == self.edit_prompt;
+        let (ex, ey, ew, eh) = (dx + 18.0, dy + 90.0, dw - 36.0, 118.0);
+        g.rrect(ex, ey, ew, eh, 4.0, pal().surface);
+        g.stroke_rrect(ex, ey, ew, eh, 4.0, pal().stroke, 1.0);
+        g.rect(ex + 2.0, ey + eh - 2.0, ew - 4.0, if focused { 2.0 } else { 1.0 }, if focused { pal().accent } else { pal().muted });
+        let has_codex = crate::codex::find().is_some();
+        let (line, color) = if !error.is_empty() {
+            (error.chars().take(96).collect::<String>(), pal().danger)
+        } else if !info.is_empty() {
+            (info, pal().accent)
+        } else if !has_codex {
+            (t("Không tìm thấy Codex trên máy này. Bạn vẫn có thể tạo bằng ChatGPT.", "Codex wasn't found on this PC. You can still create it with ChatGPT.").to_string(), pal().muted)
+        } else {
+            (t("Mất khoảng 6 đến 10 phút và dùng hạn mức Codex của bạn.", "Takes about 6 to 10 minutes and uses your Codex quota.").to_string(), pal().muted)
+        };
+        g.label(dx + 18.0, dy + 214.0, dw - 36.0, 18.0, &line, Font::Small, color);
+        if redrawing.is_none() {
+            let copy = t("Sao chép prompt cho ChatGPT", "Copy prompt for ChatGPT");
+            let cw = g.button_w(None, copy);
+            g.button(dx + 18.0, by, None, copy, Style::Normal, true, Action::GenCopy, &hover, hits);
+            let _ = cw;
+        }
+        let mut right = bx;
+        if has_codex {
+            let label = if redrawing.is_some() { t("Vẽ lại", "Redraw") } else { t("Tạo nhân vật", "Create character") };
+            let w = g.button_w(Some(ICON_GENERATE), label);
+            right -= w;
+            g.button(right, by, Some(ICON_GENERATE), label, Style::Primary, true, Action::GenStart, &hover, hits);
+            right -= 8.0;
+        }
+        let cancel = t("Huỷ", "Cancel");
+        let cw = g.button_w(None, cancel);
+        g.button(right - cw, by, None, cancel, Style::Normal, true, Action::GenClose, &hover, hits);
+    }
+
+    fn open_generate(&mut self, redrawing: Option<Character>) {
+        self.generating = Some(Generating { running: false, error: String::new(), started: std::time::Instant::now(), done: Arc::new(AtomicUsize::new(0)), cancel: Arc::new(AtomicBool::new(false)), shown: (0, 0), redrawing, info: String::new() });
+        unsafe { SetWindowTextW(self.edit_prompt, wide("").as_ptr()) };
+        self.place_edits();
+        unsafe { SetFocus(self.edit_prompt) };
+        self.invalidate();
+    }
+
+    fn copy_chatgpt_prompt(&mut self) {
+        let description = get_window_text(self.edit_prompt);
+        let hwnd = self.hwnd;
+        let Some(gen) = self.generating.as_mut() else { return };
+        gen.error.clear();
+        gen.info.clear();
+        if description.trim().is_empty() {
+            gen.error = t("Hãy mô tả nhân vật bạn muốn.", "Describe the character you want.").into();
+        } else if copy_text(hwnd, &crate::codex::chatgpt_prompt_for(&description)) {
+            gen.info = t("Đã sao chép. Dán vào ChatGPT, tải file zip về rồi kéo vào cửa sổ này.", "Copied. Paste it into ChatGPT, download the ZIP, then drag it onto this window.").into();
+        } else {
+            gen.error = t("Không sao chép được, hãy thử lại.", "Could not copy it, try again.").into();
+        }
+        self.invalidate();
+    }
+
+    /// A ZIP from ChatGPT holds the same sheets Codex would have drawn.
+    fn add_zip(&mut self, path: &Path) {
+        let hwnd = self.hwnd as isize;
+        let (path, taken) = (path.to_path_buf(), self.characters.iter().map(|c| c.id.clone()).collect::<Vec<_>>());
+        self.toast(t("Đang thêm nhân vật từ file zip…", "Adding the character from the ZIP…"));
+        spawn(move || {
+            let result = character_from_zip(&path, &taken);
+            finish_job(hwnd, JobResult::Zipped { result });
+        });
+        self.invalidate();
+    }
+
+    /// Everything after the button runs on a worker: drawing takes minutes.
+    fn start_generate(&mut self) {
+        let description = get_window_text(self.edit_prompt);
+        let hwnd = self.hwnd as isize;
+        let Some(gen) = self.generating.as_mut() else { return };
+        if description.trim().is_empty() {
+            gen.error = if gen.redrawing.is_some() { t("Hãy nói bạn muốn đổi gì.", "Say what should change.") } else { t("Hãy mô tả nhân vật bạn muốn.", "Describe the character you want.") }.into();
+            self.invalidate();
+            return;
+        }
+        gen.running = true;
+        gen.error.clear();
+        gen.started = std::time::Instant::now();
+        gen.done.store(0, Ordering::Relaxed);
+        gen.cancel.store(false, Ordering::Relaxed);
+        gen.info.clear();
+        let (cancel, done, redrawing) = (gen.cancel.clone(), gen.done.clone(), gen.redrawing.clone());
+        let taken: Vec<String> = self.characters.iter().map(|c| c.id.clone()).collect();
+        spawn(move || {
+            let result = match &redrawing {
+                Some(c) => redraw_character(c, &description, &cancel, &done).map(|()| c.id.clone()),
+                None => generate_character(&description, &taken, &cancel, &done),
+            };
+            finish_job(hwnd, JobResult::Generated { result });
+        });
+        self.place_edits();
+        self.invalidate();
     }
 
     fn paint_dialog(&mut self, g: &mut Gfx, lw: f32, lh: f32, hits: &mut Vec<Hit>) {
@@ -1120,6 +1324,14 @@ impl Picker {
                 SetWindowPos(self.edit_name, std::ptr::null_mut(), ((dx + 64.0) * k) as i32, (y + 6.0 * k) as i32, (198.0 * k) as i32, eh, flags);
             } else {
                 ShowWindow(self.edit_name, SW_HIDE);
+            }
+            if self.generating.as_ref().is_some_and(|g| !g.running) {
+                let (dw, dh) = (GENERATE_W.min(lw - 32.0), GENERATE_H.min(lh - 32.0));
+                let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
+                let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+                SetWindowPos(self.edit_prompt, std::ptr::null_mut(), ((dx + 24.0) * k) as i32, ((dy + 96.0) * k) as i32, ((dw - 48.0) * k) as i32, (104.0 * k) as i32, flags);
+            } else {
+                ShowWindow(self.edit_prompt, SW_HIDE);
             }
         }
     }
@@ -1325,6 +1537,52 @@ impl Picker {
                     }
                 }
             }
+            JobResult::Generated { result } => match result {
+                Ok(id) => {
+                    let redrew = self.generating.as_ref().is_some_and(|g| g.redrawing.is_some());
+                    self.generating = None;
+                    self.place_edits();
+                    unsafe { SetWindowTextW(self.edit_prompt, wide("").as_ptr()) };
+                    if redrew {
+                        anim::forget(&id);
+                    }
+                    window::library_changed(if redrew { Some(id.as_str()) } else { None });
+                    self.refresh(Some(&id));
+                    self.toast(if redrew { t("Đã vẽ lại nhân vật", "The character was redrawn") } else { t("Đã tạo xong nhân vật", "The character is ready") });
+                }
+                Err(e) if crate::codex::was_cancelled(&e) => {
+                    if let Some(gen) = self.generating.as_mut() {
+                        gen.running = false;
+                    }
+                    self.place_edits();
+                }
+                Err(e) => {
+                    if let Some(gen) = self.generating.as_mut() {
+                        gen.running = false;
+                        gen.error = e;
+                    }
+                    self.place_edits();
+                }
+            },
+            JobResult::Zipped { result } => match result {
+                Ok(id) => {
+                    self.generating = None;
+                    self.place_edits();
+                    window::library_changed(None);
+                    self.refresh(Some(&id));
+                    self.toast(t("Đã thêm nhân vật từ file zip", "Added the character from the ZIP"));
+                }
+                // Stays on screen with what went wrong, unlike a toast.
+                Err(e) => {
+                    if self.generating.is_none() {
+                        self.open_generate(None);
+                    }
+                    if let Some(gen) = self.generating.as_mut() {
+                        gen.info.clear();
+                        gen.error = e;
+                    }
+                }
+            },
             JobResult::Saved { result } => {
                 let Some(d) = self.dialog.as_mut() else { return };
                 d.saving = false;
@@ -1651,6 +1909,170 @@ fn pick_files(owner: HWND, multi: bool) -> Vec<PathBuf> {
     }
 }
 
+/// Where a generated character's sheets and Codex conversation are kept, outside the character itself, so they
+/// can be worked on again and never get shared along with it.
+fn generated_dir(id: &str) -> PathBuf {
+    crate::config::dir().join("generated").join(id)
+}
+
+/// The app's own copy, in a process of its own: see sheet::cut_main.
+fn cut_sheets(dir: &Path, out: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let cut = std::process::Command::new(exe).arg("--cut-sheets").arg(dir).arg(out).output().map_err(|e| e.to_string())?;
+    if cut.status.success() {
+        return Ok(());
+    }
+    Err(crate::tf!("Không dùng được các ảnh này: {}", "These images can't be used: {}", String::from_utf8_lossy(&cut.stderr)))
+}
+
+fn animated_slots(out: &Path) -> [Slot; 5] {
+    std::array::from_fn(|i| Slot::New { path: out.join(format!("{}.png", STATE_KEYS[i])), motion: None, remove_white: false })
+}
+
+/// Sheets in `dir` become a new character, and `dir` moves to where it's kept. Returns its id.
+fn add_from_sheets(dir: &Path, name: String, taken: &[String]) -> Result<String, String> {
+    let out = dir.join("animated");
+    cut_sheets(dir, &out)?;
+    let draft = Draft { name, scale: 1.0, slots: animated_slots(&out) };
+    let id = library::create(&draft, &user_root(), &|id| taken.iter().any(|t| t == id))?;
+    let _ = fs::remove_dir_all(&out);
+    let keep = generated_dir(&id);
+    let _ = fs::remove_dir_all(&keep);
+    let _ = fs::rename(dir, keep);
+    Ok(id)
+}
+
+fn work_dir() -> Result<PathBuf, String> {
+    let dir = crate::config::dir().join("generated").join(format!(".working-{}", now_ms()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn generate_character(description: &str, taken: &[String], cancel: &AtomicBool, done: &AtomicUsize) -> Result<String, String> {
+    let dir = work_dir()?;
+    let finish = (|| {
+        let drawn = crate::codex::draw(description, &dir, cancel, done)?;
+        let _ = fs::write(dir.join("description.txt"), description);
+        if let Some(session) = &drawn.session {
+            let _ = fs::write(dir.join("codex-session.txt"), session);
+        }
+        add_from_sheets(&dir, drawn.name, taken)
+    })();
+    if finish.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    finish
+}
+
+/// The character only changes once all five new sheets are drawn and cut, so a failure leaves it as it was.
+fn redraw_character(c: &Character, change: &str, cancel: &AtomicBool, done: &AtomicUsize) -> Result<(), String> {
+    let base = generated_dir(&c.id);
+    let next = base.join(".next");
+    let _ = fs::remove_dir_all(&next);
+    fs::create_dir_all(&next).map_err(|e| e.to_string())?;
+    let finish = (|| {
+        let session = fs::read_to_string(base.join("codex-session.txt")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let session = crate::codex::redraw(change, session.as_deref(), &base.join("idle.png"), &next, cancel, done)?;
+        let out = next.join("animated");
+        cut_sheets(&next, &out)?;
+        let draft = Draft { name: c.name.clone(), scale: c.scale, slots: animated_slots(&out) };
+        library::update(c, &draft, &user_root())?;
+        for key in STATE_KEYS {
+            let name = format!("{key}.png");
+            fs::rename(next.join(&name), base.join(&name)).map_err(|e| e.to_string())?;
+        }
+        if let Some(session) = session {
+            let _ = fs::write(base.join("codex-session.txt"), session);
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&next);
+    finish
+}
+
+fn character_from_zip(path: &Path, taken: &[String]) -> Result<String, String> {
+    let dir = work_dir()?;
+    let finish = (|| {
+        let name = crate::sheet::extract_zip(path, &dir)?;
+        let fallback = path.file_stem().map_or_else(|| "ChatGPT".to_string(), |s| s.to_string_lossy().chars().take(40).collect());
+        add_from_sheets(&dir, name.unwrap_or(fallback), taken)
+    })();
+    if finish.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    finish
+}
+
+fn copy_text(owner: HWND, text: &str) -> bool {
+    let wide_text = wide(text);
+    let bytes = wide_text.len() * 2;
+    unsafe {
+        if OpenClipboard(owner) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let block = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        let mut ok = false;
+        if !block.is_null() {
+            let target = GlobalLock(block) as *mut u16;
+            if !target.is_null() {
+                std::ptr::copy_nonoverlapping(wide_text.as_ptr(), target, wide_text.len());
+                GlobalUnlock(block);
+                // The clipboard owns the memory once this succeeds.
+                ok = !SetClipboardData(CF_UNICODETEXT, block as _).is_null();
+            }
+            if !ok {
+                GlobalFree(block);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
+fn pick_save_file(owner: HWND, suggested: &str) -> Option<PathBuf> {
+    let filter: Vec<u16> = t("Nhân vật Claude Buddy\0*.buddy\0\0", "Claude Buddy character\0*.buddy\0\0").encode_utf16().collect();
+    let extension = wide(library::PACK_EXTENSION);
+    let mut buffer: Vec<u16> = suggested.encode_utf16().collect();
+    buffer.resize(4096, 0);
+    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter.as_ptr();
+    ofn.lpstrFile = buffer.as_mut_ptr();
+    ofn.nMaxFile = buffer.len() as u32;
+    ofn.lpstrDefExt = extension.as_ptr();
+    ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
+    if unsafe { GetSaveFileNameW(&mut ofn) } == 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
+}
+
+/// Whether a path is a shared character rather than media to build one from.
+pub fn is_pack(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case(library::PACK_EXTENSION))
+}
+
+/// Adds a character someone shared. Opens the window on it, so you see what you got.
+pub fn import_pack(path: &Path) {
+    open(0);
+    let Some(hwnd) = with(|p| p.hwnd) else { return };
+    let Some(taken) = with(|p| p.characters.iter().map(|c| c.id.clone()).collect::<Vec<_>>()) else { return };
+    match library::import_pack(path, &user_root(), &|id| taken.iter().any(|t| t == id)) {
+        Ok(id) => {
+            window::library_changed(None);
+            with(|p| {
+                p.dialog = None;
+                p.refresh(Some(&id));
+                p.toast(t("Đã thêm nhân vật được chia sẻ", "Added the shared character"));
+            });
+        }
+        Err(e) => show_error(hwnd, t("Thêm nhân vật", "Add character"), &crate::tf!("Không thêm được nhân vật.\n\n{e}", "Could not add the character.\n\n{e}")),
+    }
+}
+
 fn pick_folder(owner: HWND) -> Option<PathBuf> {
     let title = wide(t("Chọn thư mục nhân vật", "Choose a character folder"));
     let mut info: BROWSEINFOW = unsafe { std::mem::zeroed() };
@@ -1727,9 +2149,14 @@ fn run_action(hwnd: HWND, action: Action) {
                 }
             });
         }
-        Action::OpenFolder => {
-            if let Some(Some(dir)) = with(|p| p.selected_character().and_then(|c| c.dir().map(Path::to_path_buf))) {
-                open_folder(&dir);
+        Action::Share => {
+            let Some(Some(c)) = with(|p| p.selected_character().cloned()) else { return };
+            let Some(dest) = pick_save_file(hwnd, &c.id) else { return };
+            match library::export_pack(&c, &dest) {
+                Ok(()) => {
+                    with(|p| p.toast(crate::tf!("Đã lưu {}. Gửi file này cho người khác là được.", "Saved {}. Send this file to anyone.", dest.file_name().unwrap_or_default().to_string_lossy())));
+                }
+                Err(e) => show_error(hwnd, t("Chia sẻ nhân vật", "Share character"), &e),
             }
         }
         Action::Remove => {
@@ -1746,6 +2173,7 @@ fn run_action(hwnd: HWND, action: Action) {
             match library::remove_dir(&c, &user_root()) {
                 Ok(()) => {
                     anim::forget(&c.id);
+                    let _ = fs::remove_dir_all(generated_dir(&c.id));
                     window::library_changed(None);
                     with(|p| {
                         p.refresh(None);
@@ -1773,6 +2201,35 @@ fn run_action(hwnd: HWND, action: Action) {
         }
         Action::Add => {
             with(|p| p.open_dialog(None, &[]));
+        }
+        Action::Generate => {
+            with(|p| p.open_generate(None));
+        }
+        Action::Redraw => {
+            with(|p| {
+                let c = p.selected_character().cloned();
+                p.open_generate(c);
+            });
+        }
+        Action::GenCopy => {
+            with(|p| p.copy_chatgpt_prompt());
+        }
+        Action::GenStart => {
+            with(|p| p.start_generate());
+        }
+        Action::GenStop => {
+            with(|p| {
+                if let Some(gen) = &p.generating {
+                    gen.cancel.store(true, Ordering::Relaxed);
+                }
+            });
+        }
+        Action::GenClose => {
+            with(|p| {
+                p.generating = None;
+                p.place_edits();
+                p.invalidate();
+            });
         }
         Action::Page(n) => {
             with(|p| {
@@ -1937,12 +2394,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     if IsIconic(hwnd) != 0 {
                         return;
                     }
+                    if let Some(gen) = p.generating.as_mut().filter(|g| g.running) {
+                        let now = (gen.done.load(Ordering::Relaxed), gen.started.elapsed().as_secs() / 60);
+                        if now != gen.shown {
+                            gen.shown = now;
+                            p.invalidate();
+                        }
+                    }
                     if p.toast.as_ref().is_some_and(|(_, until)| now_ms() >= *until) {
                         p.toast = None;
                         p.invalidate();
                     }
                     // Behind a dialog or sitting still, the preview costs nothing.
-                    if p.dialog.is_none() && p.page == 0 && p.is_previewing_animated() {
+                    if p.dialog.is_none() && p.generating.is_none() && p.page == 0 && p.is_previewing_animated() {
                         let (w, h) = (p.canvas.w, p.canvas.h);
                         let buf = std::slice::from_raw_parts_mut(p.canvas.bits, (w * h * 4) as usize);
                         let text = p.text.clone();
@@ -2050,7 +2514,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_MOUSEWHEEL => {
             let delta = ((wp >> 16) & 0xffff) as i16 as f32;
             with(|p| {
-                if p.dialog.is_none() && p.page == 0 {
+                if p.dialog.is_none() && p.generating.is_none() && p.page == 0 {
                     p.scroll -= delta / 120.0 * 60.0;
                     p.clamp_scroll();
                     p.invalidate();
@@ -2061,6 +2525,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_COMMAND => {
             let code = ((wp >> 16) & 0xffff) as u32;
             let id = wp & 0xffff;
+            if code == EN_CHANGE && id == ID_PROMPT {
+                with(|p| {
+                    if let Some(gen) = p.generating.as_mut().filter(|g| !g.error.is_empty()) {
+                        gen.error.clear();
+                        p.invalidate();
+                    }
+                });
+            }
             if code == EN_CHANGE && id == ID_NAME {
                 with(|p| {
                     if let Some(d) = p.dialog.as_mut() {
@@ -2075,6 +2547,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_DROPFILES => {
             let (files, pt) = dropped_files(wp as HDROP);
+            let (packs, files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| is_pack(f));
+            for pack in &packs {
+                import_pack(pack);
+            }
+            if files.is_empty() {
+                return 0;
+            }
+            if let Some(zip) = files.iter().find(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))) {
+                with(|p| {
+                    if !p.generating.as_ref().is_some_and(|g| g.running) {
+                        p.add_zip(zip);
+                    }
+                });
+                return 0;
+            }
+            if with(|p| p.generating.is_some()).unwrap_or(false) {
+                return 0;
+            }
             with(|p| {
                 if p.dialog.is_none() {
                     p.open_dialog(None, &files);
@@ -2090,10 +2580,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             0
         }
         WM_KEYDOWN if wp == 0x1B => {
-            // Esc closes the dialog, then the window
+            // Esc closes the dialog, then the window. Drawing is only ever stopped on purpose.
             let had_dialog = with(|p| {
-                let had = p.dialog.is_some();
+                if p.generating.as_ref().is_some_and(|g| g.running) {
+                    return true;
+                }
+                let had = p.dialog.is_some() || p.generating.is_some();
                 p.dialog = None;
+                p.generating = None;
+                p.place_edits();
                 p.invalidate();
                 had
             })
@@ -2103,7 +2598,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             0
         }
+        WM_CLOSE => {
+            let drawing = with(|p| p.generating.as_ref().is_some_and(|g| g.running)).unwrap_or(false);
+            if !drawing || confirm(hwnd, t("Tạo nhân vật bằng Codex", "Create a character with Codex"), t("Đóng cửa sổ sẽ huỷ nhân vật đang tạo. Đóng?", "Closing this window cancels the character being created. Close?")) {
+                DestroyWindow(hwnd);
+            }
+            0
+        }
         WM_DESTROY => {
+            with(|p| {
+                if let Some(gen) = &p.generating {
+                    gen.cancel.store(true, Ordering::Relaxed);
+                }
+            });
             HWND_OPEN.store(0, Ordering::Relaxed);
             HWND_OPEN.store(0, Ordering::Release);
             window::sync_buddy_with_picker();

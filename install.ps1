@@ -22,7 +22,9 @@ try {
         Write-Host "Downloading Claude Buddy..."
         $ProgressPreference = "SilentlyContinue"
         Invoke-WebRequest "$Base/$Asset" -OutFile $Temp -UseBasicParsing
-        $Expected = ((Invoke-WebRequest "$Base/$Asset.sha256" -UseBasicParsing).Content -split "\s+")[0]
+        # Saved to a file: Windows PowerShell hands back a download of this type as bytes, not text.
+        Invoke-WebRequest "$Base/$Asset.sha256" -OutFile "$Temp.sha256" -UseBasicParsing
+        $Expected = ((Get-Content -LiteralPath "$Temp.sha256" -Raw) -split "\s+")[0]
         $Actual = (Get-FileHash $Temp -Algorithm SHA256).Hash
         if ($Expected -ine $Actual) { throw "Checksum mismatch: expected $Expected, got $Actual. Nothing was installed." }
     }
@@ -35,7 +37,7 @@ try {
     New-Item -ItemType Directory -Force $Dir | Out-Null
     Move-Item -LiteralPath $Temp $Exe -Force
 } finally {
-    Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Temp, "$Temp.sha256" -Force -ErrorAction SilentlyContinue
 }
 
 $Shell = New-Object -ComObject WScript.Shell

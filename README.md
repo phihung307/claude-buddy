@@ -5,6 +5,19 @@
 A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
 you, done, or failed. Windows 10/11 only.
 
+## Features
+
+- **See your sessions at a glance:** the character shows whether Claude is working, needs you, is done, or hit an error.
+  Click it to jump to that session's window.
+- **Create a character from a description:** Codex draws it with all five states animated, including turning around and
+  fight moves. No Codex? Use ChatGPT and drop the ZIP on the app.
+- **Change it with another prompt:** "add a red hat" redraws it, and Codex remembers what it made.
+- **Share characters:** one `.buddy` file, double-click to add.
+- **Add your own:** WebM, MP4, PNG, APNG, GIF, WebP, JPG or SVG.
+- **Token usage:** today, this week, this month and the last 14 days.
+- **Stays out of your way:** hides during full screen, and clicks on it don't take focus from what you're typing in.
+- **English and Vietnamese.**
+
 ## Install
 
 Open PowerShell. No admin rights needed.
@@ -30,20 +43,6 @@ irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 
 This removes the app, its shortcut, its autostart entry and its hooks. Settings, usage data and added characters stay
 in `%APPDATA%\claude-buddy-rs` unless you set `$env:CLAUDE_BUDDY_PURGE = "1"` first.
 
-## Build from source
-
-```
-cargo build --release
-target\release\claude-buddy-rs.exe
-```
-
-Needs Rust and the Windows SDK (to embed the icon). On first run the app asks whether to connect to Claude Code. If you
-agree, it adds its own hooks to `%USERPROFILE%\.claude\settings.json`, keeping a backup as
-`settings.json.buddy-rs-backup-*`.
-
-The hooks store the full path to the exe. If you move the exe, reconnect in Settings. If you delete it by hand, turn off
-"Connect to Claude Code" first (or run `--remove-hooks`), otherwise Claude Code reports hook errors.
-
 ## Using it
 
 | Action | Result |
@@ -55,6 +54,8 @@ The hooks store the full path to the exe. If you move the exe, reconnect in Sett
 | Drag the character | Anywhere on the screen; the position is remembered |
 | Right-click the character or tray icon | Quick menu |
 | Click the tray icon | Opens the main window (Characters, Usage, Settings) |
+| Click **Share** on a character you added | Saves it as a `.buddy` file |
+| Double-click a `.buddy` file, or drag it or a ZIP onto the main window | Adds that character |
 
 Closing the main window keeps the app running in the tray. Quit from the right-click menu.
 
@@ -78,21 +79,6 @@ in `%USERPROFILE%\.claude\projects` (subagents included), reading only the `usag
 The big number is input + output + cache writes; cache reads are shown separately. Claude used on other machines or on
 the web isn't included.
 
-## Characters
-
-Every character is available right away. Add your own from files, or import a folder (`character.json` and one media
-file per state):
-
-| Format | Notes |
-|---|---|
-| WebM VP9 with alpha | Transparent background |
-| MP4 | No transparent background |
-| PNG, APNG, GIF, WebP, JPG | White backgrounds can be removed when adding |
-| SVG | Drawn as a still image; effects in the file don't play |
-
-Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
-file).
-
 ## Creating a character with Codex
 
 If [Codex](https://openai.com/codex/) is installed and signed in on this PC, click **Create with Codex** on the Characters
@@ -115,6 +101,21 @@ that name already exists, both are kept.
 A `.buddy` file only holds images, video, sound and a description. Nothing in it is ever run, and files with other
 content are refused.
 
+## Adding your own characters
+
+Add a character from files, or import a folder (`character.json` and one media
+file per state):
+
+| Format | Notes |
+|---|---|
+| WebM VP9 with alpha | Transparent background |
+| MP4 | No transparent background |
+| PNG, APNG, GIF, WebP, JPG | White backgrounds can be removed when adding |
+| SVG | Drawn as a still image; effects in the file don't play |
+
+Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
+file).
+
 ## Configuration
 
 `%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329). After changing the port, reconnect to Claude Code.
@@ -127,6 +128,20 @@ the app.
 - `POST /hook`: raw Claude Code hook data
 - `POST /event`: events from other tools, for example `{"session_id":"a","state":"working","step":"test","label":"Backend"}`
 - `GET /sessions`, `GET /usage`, `GET /health`
+
+## Build from source
+
+```
+cargo build --release
+target\release\claude-buddy-rs.exe
+```
+
+Needs Rust and the Windows SDK (to embed the icon). On first run the app asks whether to connect to Claude Code. If you
+agree, it adds its own hooks to `%USERPROFILE%\.claude\settings.json`, keeping a backup as
+`settings.json.buddy-rs-backup-*`.
+
+The hooks store the full path to the exe. If you move the exe, reconnect in Settings. If you delete it by hand, turn off
+"Connect to Claude Code" first (or run `--remove-hooks`), otherwise Claude Code reports hook errors.
 
 ## Development
 

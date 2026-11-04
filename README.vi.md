@@ -5,6 +5,19 @@
 Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chỉ
 chạy trên Windows 10/11.
 
+## Tính năng
+
+- **Xem nhanh các phiên:** nhân vật cho biết Claude đang chạy, cần bạn, đã xong hay gặp lỗi. Bấm vào để tới đúng cửa sổ của
+  phiên đó.
+- **Tạo nhân vật từ mô tả:** Codex vẽ đủ 5 trạng thái dạng ảnh động, có cả xoay người và đấm đá. Không có Codex thì dùng
+  ChatGPT rồi kéo file zip vào app.
+- **Sửa bằng prompt:** chỉ cần gõ "đội thêm mũ đỏ" là nhân vật được vẽ lại, và Codex nhớ những gì đã vẽ.
+- **Chia sẻ nhân vật:** gói trong một file `.buddy`, bấm đúp là thêm được.
+- **Tự thêm nhân vật:** WebM, MP4, PNG, APNG, GIF, WebP, JPG hoặc SVG.
+- **Mức dùng token:** hôm nay, tuần này, tháng này và 14 ngày gần nhất.
+- **Không làm phiền:** tự ẩn khi toàn màn hình, và bấm vào nhân vật không lấy focus khỏi chỗ bạn đang gõ.
+- **Tiếng Anh và tiếng Việt.**
+
 ## Cài đặt
 
 Mở PowerShell, không cần quyền admin.
@@ -30,19 +43,6 @@ irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 
 Lệnh này xoá app, shortcut, mục khởi động cùng Windows và hook. Cài đặt, số liệu và nhân vật đã thêm vẫn nằm ở
 `%APPDATA%\claude-buddy-rs`, trừ khi bạn đặt `$env:CLAUDE_BUDDY_PURGE = "1"` trước.
 
-## Chạy từ mã nguồn
-
-```
-cargo build --release
-target\release\claude-buddy-rs.exe
-```
-
-Cần Rust và Windows SDK (để nhúng icon). Lần đầu app hỏi có kết nối với Claude Code không. Nếu đồng ý, app thêm hook của
-riêng nó vào `%USERPROFILE%\.claude\settings.json` và giữ bản sao lưu `settings.json.buddy-rs-backup-*`.
-
-Hook lưu đường dẫn đầy đủ tới file exe. Nếu chuyển file exe đi nơi khác, hãy kết nối lại trong Cài đặt. Nếu tự xoá file
-exe, hãy tắt "Kết nối Claude Code" trước (hoặc chạy `--remove-hooks`), nếu không Claude Code sẽ báo lỗi hook.
-
 ## Dùng
 
 | Thao tác | Kết quả |
@@ -54,6 +54,8 @@ exe, hãy tắt "Kết nối Claude Code" trước (hoặc chạy `--remove-hook
 | Kéo nhân vật | Tới bất kỳ đâu trên màn hình; vị trí được ghi nhớ |
 | Chuột phải nhân vật hoặc icon khay | Menu nhanh |
 | Bấm icon khay | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
+| Bấm **Chia sẻ** ở nhân vật bạn đã thêm | Lưu thành file `.buddy` |
+| Bấm đúp file `.buddy`, hoặc kéo nó hay file zip vào cửa sổ chính | Thêm nhân vật đó |
 
 Đóng cửa sổ chính thì app vẫn chạy dưới khay. Thoát hẳn bằng menu chuột phải.
 
@@ -73,20 +75,6 @@ Giao diện có tiếng Anh và tiếng Việt, mặc định theo Windows; đ�
 Hôm nay, tuần này (từ thứ Hai), tháng này và 14 ngày gần nhất, theo giờ máy. Số liệu đếm từ transcript trong
 `%USERPROFILE%\.claude\projects` (cả subagent), chỉ đọc các con số `usage`, không đọc nội dung hội thoại. Số lớn là
 đầu vào + đầu ra + ghi cache; đọc cache tính riêng. Không gồm Claude dùng trên máy khác hay trên web.
-
-## Nhân vật
-
-Mọi nhân vật đều dùng được ngay. Thêm từ file hoặc nhập cả thư mục (`character.json` và một file media cho mỗi trạng
-thái):
-
-| Định dạng | Ghi chú |
-|---|---|
-| WebM VP9 có alpha | Nền trong suốt |
-| MP4 | Không có nền trong suốt |
-| PNG, APNG, GIF, WebP, JPG | Ảnh nền trắng có thể tách nền khi thêm |
-| SVG | Vẽ như ảnh tĩnh, hiệu ứng trong file không chạy |
-
-Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
 ## Tạo nhân vật bằng Codex
 
@@ -108,6 +96,20 @@ tên, app giữ cả hai.
 File `.buddy` chỉ chứa ảnh, video, âm thanh và phần mô tả. App không chạy bất cứ thứ gì trong file, và từ chối file có nội
 dung khác.
 
+## Tự thêm nhân vật
+
+Thêm nhân vật từ file hoặc nhập cả thư mục (`character.json` và một file media cho mỗi trạng
+thái):
+
+| Định dạng | Ghi chú |
+|---|---|
+| WebM VP9 có alpha | Nền trong suốt |
+| MP4 | Không có nền trong suốt |
+| PNG, APNG, GIF, WebP, JPG | Ảnh nền trắng có thể tách nền khi thêm |
+| SVG | Vẽ như ảnh tĩnh, hiệu ứng trong file không chạy |
+
+Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
+
 ## Cấu hình
 
 `%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
@@ -119,6 +121,19 @@ Chỉ nghe trên `127.0.0.1`. Từ chối request có header `Origin` hoặc `Ho
 - `POST /hook`: dữ liệu hook thô của Claude Code
 - `POST /event`: sự kiện từ công cụ khác, ví dụ `{"session_id":"a","state":"working","step":"test","label":"Backend"}`
 - `GET /sessions`, `GET /usage`, `GET /health`
+
+## Chạy từ mã nguồn
+
+```
+cargo build --release
+target\release\claude-buddy-rs.exe
+```
+
+Cần Rust và Windows SDK (để nhúng icon). Lần đầu app hỏi có kết nối với Claude Code không. Nếu đồng ý, app thêm hook của
+riêng nó vào `%USERPROFILE%\.claude\settings.json` và giữ bản sao lưu `settings.json.buddy-rs-backup-*`.
+
+Hook lưu đường dẫn đầy đủ tới file exe. Nếu chuyển file exe đi nơi khác, hãy kết nối lại trong Cài đặt. Nếu tự xoá file
+exe, hãy tắt "Kết nối Claude Code" trước (hoặc chạy `--remove-hooks`), nếu không Claude Code sẽ báo lỗi hook.
 
 ## Phát triển
 

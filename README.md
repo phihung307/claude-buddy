@@ -122,3 +122,7 @@ Lệnh thứ hai xuất ảnh PNG của nhân vật và cửa sổ. Lệnh thứ
 Biến môi trường để kiểm tra mà không đụng dữ liệu thật: `CLAUDE_BUDDY_RS_HOME` (thư mục dữ liệu riêng, chạy song song
 được), `CLAUDE_CONFIG_DIR` (thư mục Claude), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`, `CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (không tạm dừng
 khi khoá máy, để đo CPU).
+
+## License
+
+MIT, xem [LICENSE](LICENSE).

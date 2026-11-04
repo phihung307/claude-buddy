@@ -1,0 +1,61 @@
+[package]
+name = "claude-buddy-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native desktop companion that shows Claude Code session status"
+
+[build-dependencies]
+embed-resource = "3"
+
+[dependencies]
+# preserve_order: settings.json must keep the user's key order when hooks are written back.
+serde_json = { version = "1", features = ["preserve_order"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+# Character media. Everything is decoded once on a worker thread, then played from a compressed cache.
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+memchr = "2"
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+resvg = { version = "0.49", default-features = false }
+vp9dec = "0.1"
+# Only for MP4 through Media Foundation, whose COM interfaces windows-sys doesn't wrap.
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Drawing and decoding tests are far too slow unoptimized.
+[profile.test]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

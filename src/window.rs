@@ -1,0 +1,1663 @@
+//! The Win32 side: a per-pixel-alpha layered window, tray icon, menu and timers.
+//! The window has no redraw loop of its own: a timer redraws only the character area, at a rate set
+//! by the state, and stops entirely while the buddy is hidden. Fully transparent pixels of a layered
+//! window don't receive mouse input, so clicks there reach whatever is underneath with no extra work.
+
+use crate::i18n::t;
+use crate::anim::{self, CharAnim, Player};
+use crate::config::{self, Config};
+use crate::focus;
+use crate::theme;
+use crate::hooks_config;
+use crate::library::{self, state_index, Character, Source};
+use crate::motion::Motion;
+use crate::picker;
+use crate::render::{self, Bubble, Hit, HitRect, TextDrawer, View, CHAR_SIZE, WIN_H, WIN_W};
+use crate::server::{self, now_ms, Shared};
+use crate::sound;
+use crate::store::{self, name_of, status_of, detail_of, Session, State};
+use crate::usage;
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use windows_sys::core::{w, GUID};
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Registry::*;
+use windows_sys::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
+use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+use windows_sys::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION};
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows_sys::Win32::UI::Shell::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+const WM_WAKE: u32 = WM_APP + 1;
+const WM_TRAY: u32 = WM_APP + 2;
+const WM_DPI: u32 = WM_APP + 3;
+const WM_FIRST_RUN: u32 = WM_APP + 4;
+const WM_ANIM_READY: u32 = WM_APP + 5;
+const WM_OPEN_PICKER: u32 = WM_APP + 6;
+const WM_RESTORE_FOCUS: u32 = WM_APP + 7;
+// Not exposed by the windows-sys features this app enables.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const NIN_KEYSELECT: u32 = WM_USER + 1;
+
+const TIMER_FRAME: usize = 1;
+const TIMER_HOUSEKEEPING: usize = 2;
+const TIMER_BUBBLE: usize = 3;
+const TIMER_PANEL: usize = 4;
+const TIMER_HOVER: usize = 5;
+const TIMER_TRIM: usize = 6;
+const TIMER_SCAN: usize = 7;
+const TRIM_DELAY_MS: u32 = 3_000;
+/// A finished turn is counted after this, so a burst of them costs one scan.
+const SCAN_DELAY_MS: u32 = 20_000;
+/// How long the bubble stays after a session's state changes, unless it needs you.
+const BUBBLE_MS: u32 = 8_000;
+/// Lets the pointer cross the transparent gap to the panel or bubble without them vanishing.
+const HOVER_GRACE_MS: u32 = 500;
+/// An open panel closes by itself soon after the pointer leaves, so it is never left covering work.
+const PANEL_GRACE_MS: u32 = 2_500;
+const SIZE_FACTORS: [f32; 3] = [0.75, 1.0, 1.25];
+const BALLOON_ICON_SIZE: u32 = 64;
+const HOUSEKEEPING_MS: u32 = 5_000;
+const ACTIVE_FRAME_MS: u32 = 33;
+const DRAG_THRESHOLD: i32 = 4;
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_LOCK: u32 = 7;
+const WTS_SESSION_UNLOCK: u32 = 8;
+const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
+const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
+const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID { data1: 0x6FE69556, data2: 0x704A, data3: 0x47A0, data4: [0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47] };
+/// Same gap under the character as the drawing code leaves.
+const CHAR_GAP: f32 = 4.0;
+/// The vector characters' body and shadow, without the empty sides of their drawing square.
+const VECTOR_BODY_W: f32 = 112.0;
+/// Every 10 minutes, in housekeeping ticks: only for turns that never send Stop, like interrupted ones.
+const USAGE_SCAN_TICKS: u32 = 120;
+
+const CMD_TOGGLE: usize = 1;
+const CMD_MUTE: usize = 2;
+const CMD_TOASTS: usize = 3;
+const CMD_HOOKS: usize = 4;
+const CMD_AUTOSTART: usize = 5;
+const CMD_RESET_POS: usize = 6;
+const CMD_EXIT: usize = 7;
+const CMD_PICKER: usize = 8;
+const CMD_SETTINGS: usize = 11;
+const CMD_USER_FOLDER: usize = 9;
+const CMD_USAGE: usize = 10;
+const CMD_CHARACTER: usize = 100;
+
+const RUN_KEY: *const u16 = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN_VALUE: *const u16 = w!("ClaudeBuddyRS");
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Copies into a fixed UTF-16 field, cutting so the terminating zero always fits.
+fn copy_wide(dst: &mut [u16], s: &str) {
+    let mut n = 0;
+    for u in s.encode_utf16().take(dst.len() - 1) {
+        dst[n] = u;
+        n += 1;
+    }
+    dst[n] = 0;
+}
+
+/// Wakes the UI thread; safe from any thread.
+pub fn wake(hwnd: isize) {
+    if hwnd != 0 {
+        unsafe { PostMessageW(hwnd as HWND, WM_WAKE, 0, 0) };
+    }
+}
+
+fn exe_path() -> String {
+    std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
+}
+
+fn message_box(text: &str, flags: u32) -> i32 {
+    let t = wide(text);
+    unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), w!("Claude Buddy"), flags | MB_SETFOREGROUND) }
+}
+
+pub fn hooks_cli(install: bool) -> i32 {
+    let port = Config::load().port;
+    match hooks_config::apply(install, &exe_path(), port) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn autostart_enabled() -> bool {
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) == ERROR_SUCCESS }
+}
+
+fn set_autostart(on: bool) {
+    unsafe {
+        if on {
+            let cmd = wide(&format!("\"{}\"", exe_path()));
+            RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ, cmd.as_ptr() as *const _, (cmd.len() * 2) as u32);
+        } else {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
+        }
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            // Access denied still means it exists; anything else means it is gone.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
+}
+
+/// The window's pixel buffer: a DIB section that tiny-skia draws into directly.
+pub(crate) struct Canvas {
+    pub dc: HDC,
+    bmp: HBITMAP,
+    old: HGDIOBJ,
+    pub bits: *mut u8,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Canvas {
+    pub fn new(w: u32, h: u32) -> Option<Canvas> {
+        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = w as i32;
+        info.bmiHeader.biHeight = -(h as i32); // top-down
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        unsafe {
+            let dc = CreateCompatibleDC(std::ptr::null_mut());
+            let mut bits = std::ptr::null_mut();
+            let bmp = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            if bmp.is_null() || bits.is_null() {
+                DeleteDC(dc);
+                return None;
+            }
+            let old = SelectObject(dc, bmp);
+            Some(Canvas { dc, bmp, old, bits: bits as *mut u8, w, h })
+        }
+    }
+
+}
+
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.dc, self.old);
+            DeleteObject(self.bmp);
+            DeleteDC(self.dc);
+        }
+    }
+}
+
+/// What the character looks like right now.
+enum Visual {
+    Vector(usize),
+    /// `room`: keeps the margins that movement on the stage needs.
+    Media { player: Player, states: Box<[(Motion, bool); 5]>, room: bool },
+}
+
+/// A character finished loading on a worker thread.
+struct Loaded {
+    token: u64,
+    id: String,
+    result: Result<Arc<CharAnim>, String>,
+}
+
+static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
+
+pub fn user_root() -> PathBuf {
+    config::dir().join("characters")
+}
+
+struct Drag {
+    start_cursor: POINT,
+    last_cursor: POINT,
+    /// Where the window would be with the character in its usual spot.
+    virtual_pos: (i32, i32),
+    moved: bool,
+    hit: Option<Hit>,
+}
+
+#[derive(Debug, PartialEq)]
+struct DragStep {
+    window: (i32, i32),
+    shift: i32,
+    lift: i32,
+    virtual_pos: (i32, i32),
+}
+
+/// One step of a drag. The window (with room for bubble and panel) stays on the screen; past an edge
+/// the character slides on inside it, so it can reach all four edges. Sizes are pixels.
+fn drag_step(wanted: (i32, i32), win: (i32, i32), character: (i32, i32), gap: i32, area: &RECT) -> DragStep {
+    let window = clamp_to(area, wanted.0, wanted.1, win.0, win.1);
+    let x_limit = ((win.0 - character.0) / 2).max(0);
+    let y_limit = (win.1 - gap - character.1).max(0);
+    let shift = (wanted.0 - window.0).clamp(-x_limit, x_limit);
+    let lift = (window.1 - wanted.1).clamp(0, y_limit);
+    // Measured from here on, so turning back moves the character at once instead of working off an overshoot.
+    DragStep { window, shift, lift, virtual_pos: (window.0 + shift, window.1 - lift) }
+}
+
+struct App {
+    hwnd: HWND,
+    shared: Arc<Shared>,
+    config: Config,
+    canvas: Canvas,
+    text: TextDrawer,
+    scale: f32,
+    hits: Vec<HitRect>,
+    state: State,
+    library: Vec<Character>,
+    housekeeping_ticks: u32,
+    behind_picker: bool,
+    hovering: bool,
+    bubble_until: u64,
+    known_states: Vec<(String, State)>,
+    /// A full-screen app or presentation is in front: stay out of sight until it is gone.
+    suppressed: bool,
+    tray_state: State,
+    session_locked: bool,
+    display_off: bool,
+    visual: Visual,
+    current_sounds: [Option<PathBuf>; 2],
+    load_token: u64,
+    state_since: Instant,
+    sessions: Vec<Session>,
+    panel_open: bool,
+    hover: Option<String>,
+    tracking_leave: bool,
+    visible: bool,
+    drag: Option<Drag>,
+    started: Instant,
+    frame_ms: u32,
+    note_until: u64,
+    tray: NOTIFYICONDATAW,
+    tray_icon: HICON,
+    taskbar_created: u32,
+}
+
+thread_local! {
+    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on the app, unless it is already in use further up the stack: Win32 calls made while
+/// handling one message can deliver another synchronously.
+fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|a| a.try_borrow_mut().ok().and_then(|mut b| b.as_mut().map(f)))
+}
+
+fn work_area(pt: POINT) -> RECT {
+    unsafe {
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(mon, &mut mi);
+        mi.rcWork
+    }
+}
+
+fn clamp_to(a: &RECT, x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    (x.min(a.right - w).max(a.left), y.min(a.bottom - h).max(a.top))
+}
+
+impl App {
+    fn size(&self) -> (i32, i32) {
+        (self.canvas.w as i32, self.canvas.h as i32)
+    }
+
+    fn default_position(&self) -> (i32, i32) {
+        let a = work_area(POINT { x: 0, y: 0 });
+        let (w, h) = self.size();
+        (a.right - w - (24.0 * self.scale) as i32, a.bottom - h - (8.0 * self.scale) as i32)
+    }
+
+    fn window_pos(&self) -> (i32, i32) {
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        unsafe { GetWindowRect(self.hwnd, &mut r) };
+        (r.left, r.top)
+    }
+
+    fn move_to(&self, x: i32, y: i32) {
+        unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    }
+
+    /// Pushes the buffer to the screen; `dirty` limits what the compositor has to take in.
+    fn present(&mut self, dirty: Option<(u32, u32, u32, u32)>) {
+        let size = SIZE { cx: self.canvas.w as i32, cy: self.canvas.h as i32 };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+        let rect = dirty.map(|(x, y, w, h)| RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 });
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: std::ptr::null_mut(),
+            pptDst: std::ptr::null(),
+            psize: &size,
+            hdcSrc: self.canvas.dc,
+            pptSrc: &src,
+            crKey: 0,
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: rect.as_ref().map_or(std::ptr::null(), |r| r as *const RECT),
+        };
+        unsafe { UpdateLayeredWindowIndirect(self.hwnd, &info) };
+    }
+
+    fn time(&self) -> f32 {
+        // Wrapped so float precision never degrades in a long-running app; the wrap is a whole
+        // number of the slowest cycles closely enough that nobody can catch the jump.
+        (self.started.elapsed().as_secs_f64() % 3960.0) as f32
+    }
+
+    /// Draws the character as it should look now. None means nothing changed since the last call.
+    fn draw_character(&mut self, force: bool) -> Option<(u32, u32, u32, u32)> {
+        let (w, h, scale, state, t) = (self.canvas.w, self.canvas.h, self.char_scale(), self.state, self.time());
+        let off = self.offset_px();
+        let buf = unsafe { std::slice::from_raw_parts_mut(self.canvas.bits, (w * h * 4) as usize) };
+        match &mut self.visual {
+            Visual::Vector(kind) => Some(render::paint_character(buf, w, h, scale, *kind, state, t, off)),
+            Visual::Media { player, states, room } => {
+                let (motion, badge) = states[state_index(state)];
+                let changed = player.advance(now_ms());
+                let (fw, fh) = (player.anim.w, player.anim.h);
+                if force || motion != Motion::None || badge {
+                    let moving = self.state_since.elapsed().as_secs_f32();
+                    let badge = badge.then_some(state);
+                    return Some(render::paint_stage(buf, w, h, scale, &player.pixels, fw, fh, motion.at(moving), badge, t, off, *room));
+                }
+                // The usual case: only what differs from the last frame, or nothing at all.
+                changed.map(|r| render::paint_change(buf, w, h, scale, &player.pixels, fw, fh, r, off)).filter(|r| r.2 > 0)
+            }
+        }
+    }
+
+    /// Actually on screen: wanted by the user, and nothing full-screen in front.
+    fn shown(&self) -> bool {
+        self.visible && !self.suppressed
+    }
+
+    /// Pixel density the character is drawn at: the display's, times the chosen size.
+    fn char_scale(&self) -> f32 {
+        self.scale * SIZE_FACTORS[self.config.size.min(2) as usize]
+    }
+
+    fn bubble_mode(&self) -> Bubble {
+        if self.panel_open || self.hovering || now_ms() < self.bubble_until {
+            Bubble::All
+        } else if self.sessions.iter().any(|s| matches!(s.state, State::Waiting | State::Error)) {
+            Bubble::Attention
+        } else {
+            Bubble::Hidden
+        }
+    }
+
+    /// New states earn the bubble a few seconds. Steps within a state don't: a long task would keep it up.
+    fn note_state_changes(&mut self) {
+        let mut states: Vec<(String, State)> = self.sessions.iter().map(|s| (s.id.clone(), s.state)).collect();
+        states.sort_by(|a, b| a.0.cmp(&b.0));
+        let woke = states.iter().any(|x| x.1 != State::Idle && !self.known_states.contains(x));
+        self.known_states = states;
+        if woke {
+            self.bubble_until = now_ms() + BUBBLE_MS as u64;
+            unsafe { SetTimer(self.hwnd, TIMER_BUBBLE, BUBBLE_MS + 50, None) };
+        }
+    }
+
+    /// Windows' verdict on whether interrupting is OK right now.
+    fn notification_state() -> i32 {
+        let mut state = 0;
+        if unsafe { SHQueryUserNotificationState(&mut state) } != 0 {
+            return QUNS_ACCEPTS_NOTIFICATIONS;
+        }
+        state
+    }
+
+    fn check_fullscreen(&mut self) {
+        let state = Self::notification_state();
+        let busy = matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE);
+        let want = busy && self.config.auto_hide;
+        if want != self.suppressed {
+            self.suppressed = want;
+            self.apply_shown();
+        }
+    }
+
+    fn trim_soon(&self) {
+        unsafe { SetTimer(self.hwnd, TIMER_TRIM, TRIM_DELAY_MS, None) };
+    }
+
+    /// True when nobody can see it: locked, or the screen is off.
+    fn nobody_watching(&self) -> bool {
+        // CLAUDE_BUDDY_RS_KEEP_ANIMATING is for measuring animation cost on a machine that is locked.
+        (self.session_locked || self.display_off) && std::env::var_os("CLAUDE_BUDDY_RS_KEEP_ANIMATING").is_none()
+    }
+
+    fn set_watching(&mut self, session_locked: bool, display_off: bool) {
+        let was = self.nobody_watching();
+        self.session_locked = session_locked;
+        self.display_off = display_off;
+        if was != self.nobody_watching() {
+            self.update_timer();
+            if was {
+                self.repaint_if_shown(); // back in the present, not where it stopped
+            }
+        }
+    }
+
+    fn repaint_if_shown(&mut self) {
+        if self.shown() {
+            self.repaint();
+        }
+    }
+
+    fn apply_shown(&mut self) {
+        unsafe { ShowWindow(self.hwnd, if self.shown() { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+        self.update_timer();
+        if self.shown() {
+            self.refresh();
+        }
+    }
+
+    fn update_tray_state(&mut self) {
+        if self.state == self.tray_state {
+            return;
+        }
+        self.tray_state = self.state;
+        let icon = make_tray_icon(self.state);
+        if icon.is_null() {
+            return;
+        }
+        let old = std::mem::replace(&mut self.tray_icon, icon);
+        self.tray.hIcon = icon;
+        let mut n = self.tray;
+        n.uFlags = NIF_ICON;
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &n);
+            DestroyIcon(old);
+        }
+    }
+
+    fn offset_px(&self) -> (i32, i32) {
+        ((self.config.shift * self.scale) as i32, -(self.config.lift * self.scale) as i32)
+    }
+
+    /// Pixel size of what counts as the character for reaching screen edges: its visible body, not the
+    /// transparent room around it.
+    fn char_size_px(&self) -> (i32, i32) {
+        match &self.visual {
+            Visual::Vector(_) => ((VECTOR_BODY_W * self.char_scale()) as i32, (CHAR_SIZE * self.char_scale()) as i32),
+            Visual::Media { room: false, .. } => ((VECTOR_BODY_W * self.char_scale()) as i32, (CHAR_SIZE * self.char_scale()) as i32),
+            Visual::Media { player, .. } => (player.anim.w as i32, player.anim.h as i32),
+        }
+    }
+
+    /// A smaller or larger character may have less travel inside the window than the last one.
+    fn clamp_offset(&mut self) {
+        let (w, h) = self.size();
+        let (cw, ch) = self.char_size_px();
+        let gap = (CHAR_GAP * self.scale) as i32;
+        let x_limit = ((w - cw) / 2).max(0) as f32 / self.scale;
+        let y_limit = (h - gap - ch).max(0) as f32 / self.scale;
+        self.config.shift = self.config.shift.clamp(-x_limit, x_limit);
+        self.config.lift = self.config.lift.clamp(0.0, y_limit);
+    }
+
+    fn drag_to(&mut self, wanted: (i32, i32)) -> (i32, i32) {
+        let gap = (CHAR_GAP * self.scale) as i32;
+        let cursor = {
+            let mut p = POINT { x: 0, y: 0 };
+            unsafe { GetCursorPos(&mut p) };
+            p
+        };
+        let step = drag_step(wanted, self.size(), self.char_size_px(), gap, &work_area(cursor));
+        let (shift, lift) = (step.shift as f32 / self.scale, step.lift as f32 / self.scale);
+        if self.window_pos() != step.window {
+            self.move_to(step.window.0, step.window.1);
+        }
+        if shift != self.config.shift || lift != self.config.lift {
+            self.config.shift = shift;
+            self.config.lift = lift;
+            self.repaint();
+        }
+        step.virtual_pos
+    }
+
+    fn char_region(&self) -> (f32, f32) {
+        let f = SIZE_FACTORS[self.config.size.min(2) as usize];
+        match &self.visual {
+            Visual::Vector(_) => (CHAR_SIZE * f, CHAR_SIZE * f),
+            Visual::Media { room: false, .. } => (CHAR_SIZE * f, CHAR_SIZE * f),
+            Visual::Media { player, .. } => {
+                let (w, h) = render::media_region(player.anim.w, player.anim.h, self.char_scale());
+                (w * f, h * f)
+            }
+        }
+    }
+
+    fn current(&self) -> Option<&Character> {
+        self.library.iter().find(|c| c.id == self.config.character)
+    }
+
+    /// Shows the configured character. Vector ones are instant; media ones load on a worker thread
+    /// while the old one keeps animating, then swap in at once.
+    fn apply_character(&mut self) {
+        self.load_token += 1;
+        let Some(c) = self.current().cloned() else {
+            self.config.character = "mochi".into();
+            self.visual = Visual::Vector(0);
+            return;
+        };
+        self.current_sounds = c.sounds.clone();
+        // A built-in shows a still picture right away, and comes alive once its loops are ready.
+        if let Source::Vector(i) = c.source {
+            self.visual = Visual::Vector(i);
+            self.after_visual_change();
+        }
+        let (token, hwnd, dpi) = (self.load_token, self.hwnd as isize, self.char_scale());
+        let _ = std::thread::Builder::new().name("load-character".into()).spawn(move || {
+            let max_h = (anim::BASE_HEIGHT * c.scale).min(anim::MAX_STAGE_HEIGHT);
+            let result = anim::load(&c, anim::MAX_WIDTH, max_h, dpi);
+            *LOADED.lock().unwrap() = Some(Loaded { token, id: c.id, result });
+            unsafe { PostMessageW(hwnd as HWND, WM_ANIM_READY, 0, 0) };
+        });
+    }
+
+    fn on_loaded(&mut self) {
+        let Some(l) = LOADED.lock().unwrap().take() else { return };
+        if l.token != self.load_token {
+            return; // a newer choice won
+        }
+        match l.result {
+            Ok(a) => {
+                let Some(c) = self.library.iter().find(|c| c.id == l.id) else { return };
+                let states = Box::new(std::array::from_fn(|i| (c.states[i].motion, (c.states[i].fallback || a.failed[i]) && i != 0)));
+                let room = !c.is_builtin();
+                self.visual = Visual::Media { player: Player::new(a, state_index(self.state), now_ms()), states, room };
+                self.after_visual_change();
+            }
+            // A built-in that couldn't prepare (no disk space, say) simply stays a still picture.
+            Err(_) if matches!(self.visual, Visual::Vector(_)) && self.current().is_some_and(Character::is_builtin) => {}
+            Err(e) => {
+                let name = self.current().map_or(l.id.clone(), |c| c.name.clone());
+                self.balloon(&crate::tf!("Không tải được {name}", "Could not load {name}"), &e);
+                // What is on screen stays, so the choice on record must match it.
+                if let Visual::Vector(i) = self.visual {
+                    self.config.character = self.library.iter().find(|c| c.source == Source::Vector(i)).map_or("mochi".into(), |c| c.id.clone());
+                }
+            }
+        }
+    }
+
+    fn after_visual_change(&mut self) {
+        self.clamp_offset();
+        self.trim_soon();
+        self.frame_ms = 0;
+        self.update_timer();
+        if self.shown() {
+            self.repaint();
+        }
+    }
+
+    fn select_character(&mut self, id: &str) -> bool {
+        if !self.library.iter().any(|c| c.id == id) {
+            return false;
+        }
+        self.config.character = id.to_string();
+        self.config.save();
+        self.apply_character();
+        true
+    }
+
+    fn reload_library(&mut self) {
+        self.library = library::load_all(&user_root());
+    }
+
+    /// Full repaint, for when sessions or the panel changed.
+    fn repaint(&mut self) {
+        let (w, h, scale) = (self.canvas.w, self.canvas.h, self.scale);
+        let note = self.shared.note.lock().unwrap().clone();
+        let usage_line = self.shared.scanned.load(Ordering::Acquire).then(|| usage::summary_line(&self.shared.usage.lock().unwrap(), usage::today()));
+        let view = View {
+            sessions: &self.sessions,
+            panel_open: self.panel_open,
+            hover: self.hover.as_deref(),
+            note: note.as_deref(),
+            now: now_ms(),
+            char_region: self.char_region(),
+            char_off: (self.config.shift, -self.config.lift),
+            usage: usage_line.as_deref(),
+            bubble: self.bubble_mode(),
+        };
+        // Raw parts because `view` borrows other fields than the canvas while it is being written.
+        let buf = unsafe { std::slice::from_raw_parts_mut(self.canvas.bits, (w * h * 4) as usize) };
+        self.hits = render::paint_ui(buf, w, h, scale, &self.text, &view);
+        self.draw_character(true);
+        self.present(None);
+    }
+
+    fn frame(&mut self) {
+        if self.shown() {
+            if let Some(dirty) = self.draw_character(false) {
+                self.present(Some(dirty));
+            }
+        }
+    }
+
+    fn update_timer(&mut self) {
+        let want = match &self.visual {
+            Visual::Vector(_) => 0,
+            Visual::Media { player, states, .. } => {
+                let (motion, badge) = states[state_index(self.state)];
+                if motion != Motion::None || badge {
+                    ACTIVE_FRAME_MS
+                } else if player.clip().is_still() {
+                    0 // a still picture costs nothing at all until something changes
+                } else {
+                    player.clip().min_delay().max(ACTIVE_FRAME_MS)
+                }
+            }
+        };
+        if !self.shown() || want == 0 || self.nobody_watching() {
+            unsafe { KillTimer(self.hwnd, TIMER_FRAME) };
+            self.frame_ms = 0;
+        } else if self.frame_ms != want {
+            unsafe { SetTimer(self.hwnd, TIMER_FRAME, want, None) };
+            self.frame_ms = want;
+        }
+    }
+
+    fn refresh(&mut self) {
+        self.sessions = self.shared.store.lock().unwrap().list();
+        let state = store::overall(&self.sessions);
+        if state != self.state {
+            self.state = state;
+            self.state_since = Instant::now();
+            if let Visual::Media { player, .. } = &mut self.visual {
+                player.set_state(state_index(state), now_ms());
+            }
+        }
+        self.note_state_changes();
+        self.update_timer();
+        self.update_tip();
+        self.update_tray_state();
+        if self.shown() {
+            self.repaint();
+        }
+    }
+
+    fn announce(&mut self) {
+        let pending = std::mem::take(&mut *self.shared.pending.lock().unwrap());
+        // A finished turn is when new tokens have landed in the transcripts.
+        if pending.iter().any(|t| t.to == State::Done) {
+            unsafe { SetTimer(self.hwnd, TIMER_SCAN, SCAN_DELAY_MS, None) };
+        }
+        // Full screen, presenting or Focus Assist: a sound or popup now would interrupt. The state still
+        // shows in the tray, and on the buddy once it is back.
+        if Self::notification_state() != QUNS_ACCEPTS_NOTIFICATIONS {
+            return;
+        }
+        for t in pending.iter().filter(|t| t.notify) {
+            if focus::looking_at(&t.session) {
+                continue; // already in front of you, in that session's own window
+            }
+            if !self.config.muted {
+                let own = match t.to {
+                    State::Done => self.current_sounds[0].as_ref(),
+                    State::Waiting => self.current_sounds[1].as_ref(),
+                    _ => None,
+                };
+                match own {
+                    Some(path) => sound::play_file(path),
+                    None => sound::play(t.to),
+                }
+            }
+            if self.config.toasts {
+                let (title, body) = toast_text(&t.session, t.to);
+                let icon = make_icon(t.to, BALLOON_ICON_SIZE);
+                self.balloon_with_icon(&title, &body, icon);
+            }
+        }
+    }
+
+    fn balloon(&mut self, title: &str, body: &str) {
+        let icon = make_icon(State::Idle, BALLOON_ICON_SIZE);
+        self.balloon_with_icon(title, body, icon);
+    }
+
+    fn balloon_with_icon(&mut self, title: &str, body: &str, icon: HICON) {
+        let mut n = self.tray;
+        n.uFlags = NIF_INFO;
+        // Windows drops a balloon with empty text.
+        copy_wide(&mut n.szInfo, if body.is_empty() { " " } else { body });
+        copy_wide(&mut n.szInfoTitle, title);
+        n.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_NOSOUND;
+        n.hBalloonIcon = icon;
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &n);
+            // Windows has made its own copy by now.
+            if !icon.is_null() {
+                DestroyIcon(icon);
+            }
+        }
+    }
+
+    fn update_tip(&mut self) {
+        let tip = match self.sessions.first() {
+            Some(s) if s.state != State::Idle => format!("Claude Buddy · {}: {}", name_of(s), status_of(s)),
+            _ => crate::tf!("Claude Buddy · {} phiên", "Claude Buddy · {} sessions", self.sessions.len()),
+        };
+        copy_wide(&mut self.tray.szTip, &tip);
+        let mut n = self.tray;
+        n.uFlags = NIF_TIP;
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &n) };
+    }
+
+    fn add_tray(&mut self) {
+        let mut n = self.tray;
+        n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        unsafe {
+            Shell_NotifyIconW(NIM_ADD, &n);
+            n.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &n);
+        }
+    }
+
+    fn set_visible(&mut self, on: bool) {
+        self.visible = on;
+        self.apply_shown();
+    }
+
+    fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
+        self.hits.iter().find(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|r| r.hit.clone())
+    }
+
+    fn jump_to(&mut self, id: &str) {
+        let session = {
+            let mut st = self.shared.store.lock().unwrap();
+            let s = st.get(id).cloned();
+            if s.as_ref().is_some_and(|s| s.state.needs_attention()) {
+                st.acknowledge(id);
+            }
+            s
+        };
+        self.refresh();
+        let Some(s) = session else { return };
+        if let Some(url) = &s.url {
+            let u = wide(url);
+            unsafe { ShellExecuteW(std::ptr::null_mut(), w!("open"), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+            return;
+        }
+        // Enumerating processes and windows can take a moment: never on the UI thread.
+        let shared = self.shared.clone();
+        let hwnd = self.hwnd as isize;
+        let _ = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
+            if !focus::focus_session(&s) {
+                *shared.note.lock().unwrap() = Some(crate::tf!("Không tìm thấy cửa sổ của {}", "Could not find the window of {}", name_of(&s)));
+                wake(hwnd);
+            }
+        });
+        self.note_until = now_ms() + 5_000;
+    }
+
+    fn on_click(&mut self, hit: Option<Hit>) {
+        match hit {
+            Some(Hit::Character) => {
+                self.panel_open = !self.panel_open;
+                self.repaint();
+            }
+            Some(Hit::Bubble) => {
+                if let Some(id) = self.sessions.iter().find(|s| s.state != State::Idle).map(|s| s.id.clone()) {
+                    self.jump_to(&id);
+                }
+            }
+            Some(Hit::Row(id)) => self.jump_to(&id),
+            None => {}
+        }
+    }
+
+    /// Going by the real foreground window: a window can be told it's active while another app stays
+    /// in front, and the buddy must not stay buried behind that app. Checked again on housekeeping
+    /// because a switch isn't always announced.
+    fn sync_z_order(&mut self) {
+        unsafe {
+            let picker = picker::window();
+            let in_use = !picker.is_null() && GetForegroundWindow() == picker;
+            if in_use != self.behind_picker {
+                self.behind_picker = in_use;
+                let after = if in_use { picker } else { HWND_TOPMOST };
+                SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+
+    fn housekeeping(&mut self) {
+        let now = now_ms();
+        self.check_fullscreen();
+        self.sync_z_order();
+        // Also catches turns that never send Stop, like interrupted ones.
+        self.housekeeping_ticks = self.housekeeping_ticks.wrapping_add(1);
+        if self.housekeeping_ticks % USAGE_SCAN_TICKS == 0 {
+            usage::request_scan(self.shared.clone());
+        }
+        let running = self.shared.store.lock().unwrap().running_pids();
+        let dead: Vec<String> = running.into_iter().filter(|(_, p)| !process_alive(*p)).map(|(id, _)| id).collect();
+        let mut changed = {
+            let mut st = self.shared.store.lock().unwrap();
+            let mut pending = self.shared.pending.lock().unwrap();
+            for id in &dead {
+                if let Some(t) = st.fail(id, t("Tiến trình Claude đã dừng", "The Claude process stopped"), now) {
+                    pending.push(t);
+                }
+            }
+            let ticked = st.tick(now);
+            !dead.is_empty() || ticked
+        };
+        if self.note_until != 0 && now >= self.note_until {
+            self.note_until = 0;
+            *self.shared.note.lock().unwrap() = None;
+            changed = true;
+        }
+        if changed {
+            self.announce();
+            self.refresh();
+        } else if self.panel_open && self.shown() {
+            // "3 phút" labels age on their own.
+            self.repaint();
+        }
+    }
+
+    fn apply_dpi(&mut self, dpi: u32) {
+        let scale = dpi as f32 / 96.0;
+        if (scale - self.scale).abs() < 0.001 {
+            return;
+        }
+        let (w, h) = ((WIN_W * scale).ceil() as u32, (WIN_H * scale).ceil() as u32);
+        let Some(canvas) = Canvas::new(w, h) else { return };
+        self.canvas = canvas;
+        self.scale = scale;
+        self.text = TextDrawer::new(scale);
+        // Media frames are prepared for one pixel density, so sharp ones are fetched for the new one.
+        if matches!(self.visual, Visual::Media { .. }) {
+            self.apply_character();
+        }
+        let (x, y) = self.window_pos();
+        let a = work_area(POINT { x: x + w as i32 / 2, y: y + h as i32 / 2 });
+        let (x, y) = clamp_to(&a, x, y, w as i32, h as i32);
+        unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, w as i32, h as i32, SWP_NOZORDER | SWP_NOACTIVATE) };
+        self.repaint();
+    }
+
+    fn set_hooks(&mut self, install: bool) {
+        match hooks_config::apply(install, &exe_path(), self.config.port) {
+            Ok(_) if install => self.balloon(t("Đã kết nối Claude Code", "Connected to Claude Code"), t("Các phiên Claude Code mới sẽ hiện ở đây.", "New Claude Code sessions will show up here.")),
+            Ok(_) => self.balloon(t("Đã ngắt kết nối Claude Code", "Disconnected from Claude Code"), t("Đã gỡ hook của app khỏi settings.json.", "The app's hooks were removed from settings.json.")),
+            Err(e) => {
+                message_box(&crate::tf!("Không ghi được settings.json của Claude Code:\n{e}", "Could not write Claude Code's settings.json:\n{e}"), MB_OK | MB_ICONERROR);
+            }
+        }
+    }
+
+    fn on_command(&mut self, cmd: usize) {
+        match cmd {
+            CMD_TOGGLE => self.set_visible(!self.visible),
+            CMD_MUTE => {
+                self.config.muted = !self.config.muted;
+                self.config.save();
+            }
+            CMD_TOASTS => {
+                self.config.toasts = !self.config.toasts;
+                self.config.save();
+            }
+            CMD_HOOKS => {
+                let installed = hooks_config::status(&exe_path(), self.config.port);
+                self.set_hooks(!installed);
+            }
+            CMD_AUTOSTART => set_autostart(!autostart_enabled()),
+            CMD_RESET_POS => {
+                let (x, y) = self.default_position();
+                self.move_to(x, y);
+                self.config.position = Some((x, y));
+                self.config.shift = 0.0;
+                self.config.lift = 0.0;
+                self.config.save();
+                self.repaint();
+            }
+            CMD_EXIT => {
+                unsafe { DestroyWindow(self.hwnd) };
+            }
+            CMD_PICKER => {
+                // Opened once this borrow has ended: creating a window delivers messages right away.
+                unsafe { PostMessageW(self.hwnd, WM_OPEN_PICKER, 0, 0) };
+            }
+            CMD_USAGE => {
+                unsafe { PostMessageW(self.hwnd, WM_OPEN_PICKER, 1, 0) };
+            }
+            CMD_SETTINGS => {
+                unsafe { PostMessageW(self.hwnd, WM_OPEN_PICKER, 2, 0) };
+            }
+            CMD_USER_FOLDER => {
+                let dir = user_root();
+                let _ = std::fs::create_dir_all(&dir);
+                picker::open_folder(&dir);
+            }
+            c if c >= CMD_CHARACTER => {
+                if let Some(id) = self.library.get(c - CMD_CHARACTER).map(|x| x.id.clone()) {
+                    self.select_character(&id);
+                    picker::notify_changed();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn build_menu(&self) -> HMENU {
+        unsafe {
+            let m = CreatePopupMenu();
+            let add = |menu: HMENU, id: usize, label: &str, checked: bool| {
+                let l = wide(label);
+                AppendMenuW(menu, MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED }, id, l.as_ptr());
+            };
+            add(m, CMD_TOGGLE, if self.visible { t("Ẩn Buddy", "Hide Buddy") } else { t("Hiện Buddy", "Show Buddy") }, false);
+            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+            let chars = CreatePopupMenu();
+            for (i, c) in self.library.iter().enumerate() {
+                add(chars, CMD_CHARACTER + i, &c.name, c.id == self.config.character);
+            }
+            let change = wide(t("Đổi nhân vật", "Change character"));
+            AppendMenuW(m, MF_POPUP, chars as usize, change.as_ptr());
+            add(m, CMD_PICKER, t("Quản lý nhân vật…", "Manage characters…"), false);
+            add(m, CMD_USAGE, t("Xem mức dùng…", "View usage…"), false);
+            add(m, CMD_SETTINGS, t("Cài đặt…", "Settings…"), false);
+            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+            add(m, CMD_MUTE, t("Tắt tiếng", "Mute"), self.config.muted);
+            AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+            add(m, CMD_EXIT, t("Thoát", "Quit"), false);
+            m
+        }
+    }
+}
+
+/// Runs outside any app borrow: the menu's modal loop keeps delivering timer messages meanwhile.
+fn show_menu(hwnd: HWND) {
+    let Some(menu) = with_app(|a| a.build_menu()) else { return };
+    let cmd = unsafe {
+        let mut p = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut p);
+        // A menu only closes on clicking elsewhere if its owner is the foreground window, which a
+        // no-activate window can't be. So that rule is lifted for just as long as the menu is up...
+        let was_working_in = GetForegroundWindow();
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_NOACTIVATE as isize));
+        SetForegroundWindow(hwnd);
+        let c = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, std::ptr::null());
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+        DestroyMenu(menu);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+        // ...and the keyboard goes back to whatever you were typing in, unless the choice opens a
+        // window, which is where you want to be next. Posted, because the menu is still closing at
+        // this point and would take the focus straight back.
+        let opens_window = matches!(c as usize, CMD_PICKER | CMD_USAGE | CMD_SETTINGS | CMD_USER_FOLDER);
+        if !opens_window && !was_working_in.is_null() && was_working_in != hwnd {
+            PostMessageW(hwnd, WM_RESTORE_FOCUS, was_working_in as WPARAM, 0);
+        }
+        c
+    };
+    if cmd != 0 {
+        with_app(|a| a.on_command(cmd as usize));
+    }
+}
+
+fn first_run_question() {
+    let answer = message_box(
+        t("Kết nối với Claude Code để Buddy hiện trạng thái các phiên?\n\nApp sẽ thêm hook của riêng nó vào settings.json của Claude Code (có sao lưu trước, hook khác giữ nguyên). Có thể gỡ bất cứ lúc nào từ menu khay.", "Connect to Claude Code so Buddy can show your sessions?\n\nThe app adds its own hooks to Claude Code's settings.json (after a backup; other hooks stay as they are). You can remove them at any time from the tray menu."),
+        MB_YESNO | MB_ICONQUESTION,
+    );
+    with_app(|a| {
+        a.config.asked_hooks = true;
+        a.config.save();
+        if answer == IDYES {
+            a.set_hooks(true);
+        }
+    });
+}
+
+fn lparam_point(l: LPARAM) -> (i32, i32) {
+    ((l & 0xffff) as i16 as i32, ((l >> 16) & 0xffff) as i16 as i32)
+}
+
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_TIMER => {
+            match wp {
+                TIMER_FRAME => with_app(|a| a.frame()),
+                TIMER_HOUSEKEEPING => with_app(|a| a.housekeeping()),
+                TIMER_TRIM => with_app(|_| {
+                    // Startup and one-off work leave pages behind that the app won't touch again.
+                    KillTimer(hwnd, TIMER_TRIM);
+                    K32EmptyWorkingSet(GetCurrentProcess());
+                }),
+                TIMER_SCAN => with_app(|a| {
+                    KillTimer(hwnd, TIMER_SCAN);
+                    usage::request_scan(a.shared.clone());
+                }),
+                TIMER_BUBBLE => with_app(|a| {
+                    KillTimer(hwnd, TIMER_BUBBLE);
+                    a.repaint_if_shown();
+                }),
+                TIMER_HOVER => with_app(|a| {
+                    KillTimer(hwnd, TIMER_HOVER);
+                    a.hovering = false;
+                    a.repaint_if_shown();
+                }),
+                TIMER_PANEL => with_app(|a| {
+                    KillTimer(hwnd, TIMER_PANEL);
+                    if a.panel_open {
+                        a.panel_open = false;
+                        a.repaint_if_shown();
+                    }
+                }),
+                _ => None,
+            };
+            0
+        }
+        WM_WAKE => {
+            with_app(|a| {
+                a.announce();
+                a.refresh();
+            });
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = lparam_point(lp);
+            with_app(|a| {
+                let mut p = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut p);
+                let (wx, wy) = a.window_pos();
+                let (ox, oy) = a.offset_px();
+                a.drag = Some(Drag { start_cursor: p, last_cursor: p, virtual_pos: (wx + ox, wy + oy), moved: false, hit: a.hit_at(x, y) });
+            });
+            SetCapture(hwnd);
+            0
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = lparam_point(lp);
+            with_app(|a| {
+                if !a.tracking_leave {
+                    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                    TrackMouseEvent(&mut t);
+                    a.tracking_leave = true;
+                }
+                if let Some(d) = &mut a.drag {
+                    let mut p = POINT { x: 0, y: 0 };
+                    GetCursorPos(&mut p);
+                    let (dx, dy) = (p.x - d.start_cursor.x, p.y - d.start_cursor.y);
+                    if d.moved || dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD {
+                        d.moved = true;
+                        let wanted = (d.virtual_pos.0 + p.x - d.last_cursor.x, d.virtual_pos.1 + p.y - d.last_cursor.y);
+                        d.last_cursor = p;
+                        let next = a.drag_to(wanted);
+                        if let Some(d) = &mut a.drag {
+                            d.virtual_pos = next;
+                        }
+                    }
+                } else {
+                    KillTimer(hwnd, TIMER_HOVER);
+                    KillTimer(hwnd, TIMER_PANEL);
+                    let hit = a.hit_at(x, y);
+                    let was_hovering = std::mem::replace(&mut a.hovering, hit.is_some());
+                    let hover = match hit {
+                        Some(Hit::Row(id)) => Some(id),
+                        _ => None,
+                    };
+                    if hover != a.hover || was_hovering != a.hovering {
+                        a.hover = hover;
+                        a.repaint();
+                    }
+                }
+            });
+            0
+        }
+        WM_MOUSELEAVE => {
+            with_app(|a| {
+                a.tracking_leave = false;
+                SetTimer(hwnd, TIMER_HOVER, HOVER_GRACE_MS, None);
+                if a.panel_open {
+                    SetTimer(hwnd, TIMER_PANEL, PANEL_GRACE_MS, None);
+                }
+                if a.hover.take().is_some() {
+                    a.repaint();
+                }
+            });
+            0
+        }
+        WM_LBUTTONUP => {
+            // Taken first: ReleaseCapture delivers WM_CAPTURECHANGED right away, which cancels a drag.
+            let drag = with_app(|a| a.drag.take()).flatten();
+            ReleaseCapture();
+            with_app(|a| {
+                let Some(d) = drag else { return };
+                if d.moved {
+                    a.config.position = Some(a.window_pos());
+                    a.config.save();
+                } else {
+                    a.on_click(d.hit);
+                }
+            });
+            0
+        }
+        WM_CAPTURECHANGED => {
+            with_app(|a| a.drag = None);
+            0
+        }
+        WM_RBUTTONUP => {
+            show_menu(hwnd);
+            0
+        }
+        WM_TRAY => {
+            // With NOTIFYICON_VERSION_4 the low word of lParam carries the event.
+            match (lp & 0xffff) as u32 {
+                WM_CONTEXTMENU | WM_RBUTTONUP => show_menu(hwnd),
+                // As with any Windows tray app, a click opens the app; hiding the buddy is in the menu.
+                NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP => picker::open(0),
+                _ => {}
+            }
+            0
+        }
+        WM_DPICHANGED => {
+            // Posted: this can arrive in the middle of a drag's SetWindowPos, while the app is in use.
+            PostMessageW(hwnd, WM_DPI, (wp & 0xffff) as WPARAM, 0);
+            0
+        }
+        WM_DPI => {
+            with_app(|a| a.apply_dpi(wp as u32));
+            0
+        }
+        WM_FIRST_RUN => {
+            first_run_question();
+            0
+        }
+        WM_WTSSESSION_CHANGE => {
+            match wp as u32 {
+                WTS_SESSION_LOCK => {
+                    with_app(|a| a.set_watching(true, a.display_off));
+                }
+                WTS_SESSION_UNLOCK => {
+                    with_app(|a| a.set_watching(false, a.display_off));
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_POWERBROADCAST => {
+            if wp as u32 == PBT_POWERSETTINGCHANGE {
+                let s = &*(lp as *const POWERBROADCAST_SETTING);
+                if s.PowerSetting.data1 == GUID_CONSOLE_DISPLAY_STATE.data1 {
+                    let off = s.Data[0] == 0;
+                    with_app(|a| a.set_watching(a.session_locked, off));
+                }
+            }
+            1
+        }
+        WM_SETTINGCHANGE => {
+            // Light/dark or accent changed, among others: cheap enough to just look again.
+            crate::theme::reload();
+            with_app(|a| {
+                if a.shown() {
+                    a.repaint();
+                }
+            });
+            0
+        }
+        WM_ANIM_READY => {
+            with_app(|a| a.on_loaded());
+            0
+        }
+        WM_RESTORE_FOCUS => {
+            SetForegroundWindow(wp as HWND);
+            0
+        }
+        WM_OPEN_PICKER => {
+            picker::open(wp as u8);
+            0
+        }
+        WM_DESTROY => {
+            with_app(|a| {
+                let mut n = a.tray;
+                n.uFlags = 0;
+                Shell_NotifyIconW(NIM_DELETE, &n);
+                DestroyIcon(a.tray_icon);
+            });
+            PostQuitMessage(0);
+            0
+        }
+        _ => {
+            if with_app(|a| msg == a.taskbar_created).unwrap_or(false) {
+                // Explorer restarted: tray icons have to be added again.
+                with_app(|a| a.add_tray());
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+    }
+}
+
+/// Says what happened and where, in words, for a Windows notification.
+fn toast_text(s: &Session, to: State) -> (String, String) {
+    let title = match to {
+        State::Waiting => t("Claude cần bạn", "Claude needs you"),
+        State::Done => t("Claude đã xong", "Claude is done"),
+        State::Error => t("Claude gặp lỗi", "Claude hit an error"),
+        _ => "Claude Buddy",
+    };
+    let name = name_of(s);
+    let body = match detail_of(s) {
+        Some(d) if !d.is_empty() => format!("{name}\n{d}"),
+        _ => name,
+    };
+    (title.to_string(), body)
+}
+
+/// The logo at tray size, with a dot saying what the sessions are doing. Lets you check on Claude with
+/// a glance at the taskbar, with nothing covering your work.
+fn make_tray_icon(state: State) -> HICON {
+    make_icon(state, unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32)
+}
+
+fn make_icon(state: State, size: u32) -> HICON {
+    let status = (state != State::Idle).then(|| render::state_color(state));
+    unsafe {
+        let pixels = render::paint_icon(size, status);
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = size as i32;
+        info.bmiHeader.biHeight = -(size as i32);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut bits = std::ptr::null_mut();
+        let color = CreateDIBSection(std::ptr::null_mut(), &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        if color.is_null() || bits.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
+        let mask = CreateBitmap(size as i32, size as i32, 1, 1, std::ptr::null());
+        let ii = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&ii);
+        DeleteObject(color);
+        DeleteObject(mask);
+        icon
+    }
+}
+
+pub fn run() {
+    unsafe {
+        // The file and folder pickers are COM dialogs.
+        CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        crate::theme::reload();
+        // One instance per user: a second copy would only fail to bind the port. A copy with its own
+        // data folder is a separate install with its own port, and may run alongside.
+        let mutex_name = match std::env::var("CLAUDE_BUDDY_RS_HOME") {
+            Ok(home) => wide(&format!("Local\\ClaudeBuddyRS-{}", home.replace(['\\', '/', ':'], "_"))),
+            Err(_) => wide("Local\\ClaudeBuddyRS"),
+        };
+        CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return;
+        }
+    }
+    let config = Config::load();
+    theme::set_translucent(config.translucent);
+    let shared = Arc::new(Shared::default());
+    if let Err(e) = server::start(shared.clone(), config.port) {
+        message_box(&crate::tf!("Không mở được cổng {}: {e}\nĐổi \"port\" trong config.json của app.", "Could not open port {}: {e}\nChange \"port\" in the app's config.json.", config.port), MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let class = w!("ClaudeBuddyRS");
+        let mut wc: WNDCLASSW = std::mem::zeroed();
+        wc.lpfnWndProc = Some(wnd_proc);
+        wc.hInstance = instance;
+        wc.lpszClassName = class;
+        wc.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
+        wc.hIcon = LoadIconW(instance, 1 as *const u16);
+        RegisterClassW(&wc);
+
+        // WS_EX_NOACTIVATE: clicking the buddy must not steal focus from what you are typing in.
+        let hwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            class,
+            w!("Claude Buddy"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
+        );
+        if hwnd.is_null() {
+            message_box(t("Không tạo được cửa sổ.", "Could not create the window."), MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
+        let (w, h) = ((WIN_W * scale).ceil() as u32, (WIN_H * scale).ceil() as u32);
+        let Some(canvas) = Canvas::new(w, h) else {
+            message_box(t("Không đủ bộ nhớ đồ hoạ.", "Not enough graphics memory."), MB_OK | MB_ICONERROR);
+            return;
+        };
+
+        let tray_icon = make_tray_icon(State::Idle);
+        let mut tray: NOTIFYICONDATAW = std::mem::zeroed();
+        tray.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        tray.hWnd = hwnd;
+        tray.uID = 1;
+        tray.uCallbackMessage = WM_TRAY;
+        tray.hIcon = tray_icon;
+        copy_wide(&mut tray.szTip, "Claude Buddy");
+
+        // Whoever ran the install command already said yes.
+        let ask_hooks = !config.asked_hooks && !hooks_config::status(&exe_path(), config.port);
+        let app = App {
+            hwnd,
+            shared: shared.clone(),
+            config,
+            canvas,
+            text: TextDrawer::new(scale),
+            scale,
+            hits: Vec::new(),
+            state: State::Idle,
+            library: library::load_all(&user_root()),
+            housekeeping_ticks: 0,
+            behind_picker: false,
+            hovering: false,
+            bubble_until: 0,
+            known_states: Vec::new(),
+            suppressed: false,
+            tray_state: State::Idle,
+            session_locked: false,
+            display_off: false,
+            visual: Visual::Vector(0),
+            current_sounds: [None, None],
+            load_token: 0,
+            state_since: Instant::now(),
+            sessions: Vec::new(),
+            panel_open: false,
+            hover: None,
+            tracking_leave: false,
+            visible: true,
+            drag: None,
+            started: Instant::now(),
+            frame_ms: 0,
+            note_until: 0,
+            tray,
+            tray_icon,
+            taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+        };
+        APP.with(|a| *a.borrow_mut() = Some(app));
+
+        with_app(|a| {
+            let (w, h) = a.size();
+            let (x, y) = match a.config.position {
+                Some((x, y)) => clamp_to(&work_area(POINT { x: x + w / 2, y: y + h / 2 }), x, y, w, h),
+                None => a.default_position(),
+            };
+            SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+            a.add_tray();
+            a.apply_character();
+            a.refresh();
+        });
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        SetTimer(hwnd, TIMER_HOUSEKEEPING, HOUSEKEEPING_MS, None);
+        // Nobody sees animation on a locked or dark screen, so it stops completely until they can.
+        WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+        RegisterPowerSettingNotification(hwnd as *mut _, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+        shared.hwnd.store(hwnd as isize, Ordering::Relaxed);
+        usage::request_scan(shared.clone());
+        if ask_hooks {
+            PostMessageW(hwnd, WM_FIRST_RUN, 0, 0);
+        }
+
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_KEYDOWN && msg.wParam == 0x1B && picker::forward_escape(msg.hwnd) {
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+// ---- what the picker needs from the app ----
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Setting {
+    Hooks,
+    Sound,
+    Toasts,
+    Autostart,
+    AutoHide,
+    Translucent,
+    Size(u8),
+    /// 0 follows Windows, 1 Vietnamese, 2 English.
+    Language(u8),
+    ResetPosition,
+    Folder,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct SettingsView {
+    pub hooks: bool,
+    pub sound: bool,
+    pub toasts: bool,
+    pub autostart: bool,
+    pub auto_hide: bool,
+    pub translucent: bool,
+    pub size: u8,
+    pub language: u8,
+}
+
+/// Keeps the buddy under the main window while you use it, and on top of everything otherwise.
+pub fn sync_buddy_with_picker() {
+    with_app(|a| a.sync_z_order());
+}
+
+/// After something big went away, like the main window.
+pub fn trim_memory_soon() {
+    with_app(|a| a.trim_soon());
+}
+
+pub fn settings_view() -> Option<SettingsView> {
+    with_app(|a| SettingsView {
+        hooks: hooks_config::status(&exe_path(), a.config.port),
+        sound: !a.config.muted,
+        toasts: a.config.toasts,
+        autostart: autostart_enabled(),
+        auto_hide: a.config.auto_hide,
+        translucent: a.config.translucent,
+        size: a.config.size,
+        language: match a.config.language.as_str() {
+            "vi" => 1,
+            "en" => 2,
+            _ => 0,
+        },
+    })
+}
+
+pub fn apply_setting(s: Setting) {
+    with_app(|a| match s {
+        Setting::Hooks => a.on_command(CMD_HOOKS),
+        Setting::Sound => a.on_command(CMD_MUTE),
+        Setting::Toasts => a.on_command(CMD_TOASTS),
+        Setting::Autostart => a.on_command(CMD_AUTOSTART),
+        Setting::ResetPosition => a.on_command(CMD_RESET_POS),
+        Setting::Folder => a.on_command(CMD_USER_FOLDER),
+        Setting::AutoHide => {
+            a.config.auto_hide = !a.config.auto_hide;
+            a.config.save();
+            a.check_fullscreen();
+        }
+        Setting::Translucent => {
+            a.config.translucent = !a.config.translucent;
+            a.config.save();
+            theme::set_translucent(a.config.translucent);
+            a.repaint_if_shown();
+        }
+        Setting::Language(n) => {
+            a.config.language = ["auto", "vi", "en"][n.min(2) as usize].into();
+            a.config.save();
+            crate::i18n::apply(&a.config.language);
+            a.update_tip();
+            a.repaint_if_shown();
+        }
+        Setting::Size(n) => {
+            a.config.size = n.min(2);
+            a.config.save();
+            a.apply_character();
+            a.clamp_offset();
+            a.repaint_if_shown();
+        }
+    });
+}
+
+pub struct LibrarySnapshot {
+    pub characters: Vec<Character>,
+    pub current: String,
+    pub usage: usage::Days,
+    pub usage_ready: bool,
+}
+
+pub fn library_snapshot() -> Option<LibrarySnapshot> {
+    with_app(|a| LibrarySnapshot {
+        characters: a.library.clone(),
+        current: a.config.character.clone(),
+        usage: a.shared.usage.lock().unwrap().clone(),
+        usage_ready: a.shared.scanned.load(Ordering::Acquire),
+    })
+}
+
+pub fn choose_character(id: &str) -> bool {
+    with_app(|a| a.select_character(id)).unwrap_or(false)
+}
+
+/// After characters were added, edited or removed on disk.
+pub fn library_changed(edited: Option<&str>) {
+    with_app(|a| {
+        a.reload_library();
+        if edited == Some(a.config.character.as_str()) {
+            a.apply_character(); // the buddy shows the edit right away
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Event, Store};
+
+    #[test]
+    fn notifications_say_what_happened_and_where() {
+        let mut st = Store::default();
+        let e = Event { session_id: "a".into(), event: "Notification".into(), cwd: Some("C:\\work\\shop-api".into()), message: Some("Cần quyền chạy lệnh".into()), ..Default::default() };
+        st.apply(&e, 0).unwrap();
+        let (title, body) = toast_text(st.get("a").unwrap(), State::Waiting);
+        assert_eq!(title, "Claude cần bạn");
+        assert_eq!(body, "shop-api\nCần quyền chạy lệnh");
+        assert!(!title.chars().any(|c| c as u32 > 0x2000), "no emoji in titles");
+    }
+
+    const SCREEN: RECT = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+    const WIN: (i32, i32) = (300, 620);
+    const CHARACTER: (i32, i32) = (112, 160);
+
+    /// Runs a whole drag, the way the mouse would, from the usual bottom right spot.
+    fn drag(from: (i32, i32), moves: &[(i32, i32)]) -> DragStep {
+        let mut step = drag_step(from, WIN, CHARACTER, 4, &SCREEN);
+        for m in moves {
+            step = drag_step((step.virtual_pos.0 + m.0, step.virtual_pos.1 + m.1), WIN, CHARACTER, 4, &SCREEN);
+        }
+        step
+    }
+
+    /// Where the character's own rectangle ends up on the screen: (left, top, right, bottom).
+    fn on_screen(s: &DragStep) -> (i32, i32, i32, i32) {
+        let cx = s.window.0 + WIN.0 / 2 + s.shift;
+        let bottom = s.window.1 + WIN.1 - 4 - s.lift;
+        (cx - CHARACTER.0 / 2, bottom - CHARACTER.1, cx + CHARACTER.0 / 2, bottom)
+    }
+
+    #[test]
+    fn the_character_reaches_all_four_edges_of_the_screen() {
+        let start = (1500, 400);
+        let (l, _, _, _) = on_screen(&drag(start, &[(-5000, 0)]));
+        assert_eq!(l, 0, "left edge");
+        let (_, _, r, _) = on_screen(&drag(start, &[(5000, 0)]));
+        assert_eq!(r, 1920, "right edge");
+        let (_, t, _, _) = on_screen(&drag(start, &[(0, -5000)]));
+        assert_eq!(t, 0, "top edge");
+        let (_, _, _, b) = on_screen(&drag(start, &[(0, 5000)]));
+        assert_eq!(b, 1040 - 4, "bottom edge");
+        let corner = on_screen(&drag(start, &[(-5000, -5000)]));
+        assert_eq!((corner.0, corner.1), (0, 0), "corner");
+    }
+
+    #[test]
+    fn the_window_itself_never_leaves_the_screen() {
+        for m in [(-5000, -5000), (5000, 5000), (-5000, 5000), (5000, -5000)] {
+            let s = drag((1000, 300), &[m]);
+            assert!(s.window.0 >= 0 && s.window.0 + WIN.0 <= 1920 && s.window.1 >= 0 && s.window.1 + WIN.1 <= 1040, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn turning_back_moves_at_once_instead_of_working_off_an_overshoot() {
+        let at_edge = drag((1000, 300), &[(-5000, 0)]);
+        let back = drag_step((at_edge.virtual_pos.0 + 10, at_edge.virtual_pos.1), WIN, CHARACTER, 4, &SCREEN);
+        assert_eq!(on_screen(&back).0, on_screen(&at_edge).0 + 10);
+    }
+
+    #[test]
+    fn ordinary_moves_only_move_the_window() {
+        let s = drag((500, 200), &[(30, -20)]);
+        assert_eq!((s.window, s.shift, s.lift), ((530, 180), 0, 0));
+    }
+
+    #[test]
+    fn a_second_monitor_left_of_the_main_one_works_too() {
+        let left = RECT { left: -1600, top: -100, right: 0, bottom: 800 };
+        let s = drag_step((-5000, -5000), WIN, CHARACTER, 4, &left);
+        assert_eq!((s.window.0, s.window.1), (-1600, -100));
+        assert_eq!(s.shift, -(WIN.0 - CHARACTER.0) / 2);
+        assert_eq!(s.lift, WIN.1 - 4 - CHARACTER.1);
+    }
+
+    #[test]
+    fn a_character_wider_than_the_window_simply_has_no_side_travel() {
+        let s = drag_step((-5000, 100), WIN, (400, 160), 4, &SCREEN);
+        assert_eq!((s.window.0, s.shift), (0, 0));
+    }
+}

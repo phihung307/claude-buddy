@@ -1,115 +1,123 @@
-# Claude Buddy (Rust)
+# Claude Buddy
 
-Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì. Viết lại bằng Rust và Win32 thuần
-(không Electron, không WebView). Chỉ chạy trên Windows 10/11.
+**English** | [Tiếng Việt](README.vi.md)
 
-## Cài đặt / Install
+A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
+you, done, or failed. Written in Rust on plain Win32, with no Electron and no WebView. Windows 10/11 only.
 
-Mở PowerShell, không cần quyền admin. Lệnh này tải app, tạo shortcut trong Start Menu, thêm hook vào Claude Code
-(có sao lưu `settings.json`, hook khác giữ nguyên) rồi mở app.
+## Install
 
-Open PowerShell, no admin rights needed. This downloads the app, adds a Start Menu shortcut, adds its hooks to
-Claude Code (after backing up `settings.json`; other hooks stay as they are) and starts it.
+Open PowerShell. No admin rights needed.
 
 ```powershell
 irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.ps1 | iex
 ```
 
-Gỡ / Uninstall:
+This downloads the app, adds a Start Menu shortcut, adds its hooks to Claude Code and starts it. `settings.json` is
+backed up first and your other hooks stay as they are. Only Claude Code sessions opened after that show up.
+
+Run the same command again to update. To skip the hooks, set `$env:CLAUDE_BUDDY_NO_HOOKS = "1"` first; the app then
+asks when it starts.
+
+The app isn't code-signed, so Windows SmartScreen or antivirus software may warn about it.
+
+## Uninstall
 
 ```powershell
 irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 | iex
 ```
 
-Chạy lại lệnh cài để cập nhật. Không muốn tự thêm hook: đặt `$env:CLAUDE_BUDDY_NO_HOOKS = "1"` trước khi cài.
+This removes the app, its shortcut, its autostart entry and its hooks. Settings, usage data and added characters stay
+in `%APPDATA%\claude-buddy-rs` unless you set `$env:CLAUDE_BUDDY_PURGE = "1"` first.
 
-Run the install command again to update. To skip the hooks, set `$env:CLAUDE_BUDDY_NO_HOOKS = "1"` first.
-
-## Chạy từ mã nguồn / Build from source
+## Build from source
 
 ```
 cargo build --release
 target\release\claude-buddy-rs.exe
 ```
 
-Cần Rust và Windows SDK (để nhúng icon). Lần đầu app hỏi có kết nối với Claude Code không. Nếu đồng ý, app thêm hook
-của riêng nó vào `%USERPROFILE%\.claude\settings.json` (có sao lưu `settings.json.buddy-rs-backup-*`, hook khác giữ
-nguyên). Chỉ các phiên Claude Code mở sau đó mới hiện lên.
+Needs Rust and the Windows SDK (to embed the icon). On first run the app asks whether to connect to Claude Code. If you
+agree, it adds its own hooks to `%USERPROFILE%\.claude\settings.json`, keeping a backup as
+`settings.json.buddy-rs-backup-*`.
 
-Hook lưu đường dẫn đầy đủ tới file exe. Nếu chuyển file exe đi nơi khác, hãy kết nối lại trong Cài đặt.
+The hooks store the full path to the exe. If you move the exe, reconnect in Settings. If you delete it by hand, turn off
+"Connect to Claude Code" first (or run `--remove-hooks`), otherwise Claude Code reports hook errors.
 
-## Dùng
+## Using it
 
-| Thao tác | Kết quả |
+| Action | Result |
 |---|---|
-| Rê chuột vào nhân vật | Hiện đầy đủ trạng thái các phiên |
-| Bấm nhân vật | Mở/đóng danh sách phiên (tự đóng sau khi chuột rời đi) |
-| Bấm bong bóng | Mở cửa sổ của phiên cần chú ý nhất |
-| Bấm một dòng phiên | Mở cửa sổ terminal/IDE của phiên đó |
-| Kéo nhân vật | Tới bất kỳ đâu trên màn hình; vị trí được ghi nhớ |
-| Chuột phải nhân vật hoặc icon khay | Menu nhanh |
-| Bấm icon khay | Mở cửa sổ chính (Nhân vật, Usage, Cài đặt) |
+| Hover over the character | Shows the full status of your sessions |
+| Click the character | Opens or closes the session list (closes by itself after the mouse leaves) |
+| Click the bubble | Opens the window of the session that most needs attention |
+| Click a session row | Opens that session's terminal or IDE window |
+| Drag the character | Anywhere on the screen; the position is remembered |
+| Right-click the character or tray icon | Quick menu |
+| Click the tray icon | Opens the main window (Characters, Usage, Settings) |
 
-Đóng cửa sổ chính thì app vẫn chạy dưới khay. Thoát hẳn bằng menu chuột phải.
+Closing the main window keeps the app running in the tray. Quit from the right-click menu.
 
-## Không che và không làm phiền
+The interface is in English and Vietnamese. It follows Windows by default; change it under Settings > Language.
 
-- Bong bóng chỉ hiện vài giây khi trạng thái đổi, rộng vừa đủ nội dung. Chỉ phiên cần bạn hoặc bị lỗi mới ở lại.
-- Icon khay có chấm màu theo trạng thái, nên xem nhanh được mà không cần gì trên màn hình.
-- Vùng trong suốt của cửa sổ buddy cho chuột đi xuyên qua; bấm vào buddy không lấy focus khỏi app đang gõ.
-- Tự ẩn khi trình chiếu, xem phim hay chơi game toàn màn hình, rồi tự hiện lại.
-- Không kêu và không hiện thông báo khi đang toàn màn hình, bật Focus Assist, hoặc khi bạn đang ở đúng cửa sổ của phiên đó.
-- Nhân vật có ba cỡ. Những thứ trên chỉnh trong Cài đặt.
+## Stays out of your way
 
-## Vì sao nhẹ
+- Bubbles show for a few seconds when a status changes, just wide enough for their text. Only sessions that need you or
+  failed stay up.
+- The tray icon has a dot colored by status, so you can check at a glance with nothing on the screen.
+- Transparent parts of the buddy let the mouse through, and clicking the buddy doesn't take focus from what you're
+  typing in.
+- Hides during full-screen presentations, movies and games, then comes back.
+- No sound or notification during full screen or Focus Assist, or when you're already in that session's window.
+- The character comes in three sizes. All of this can be changed in Settings.
 
-- Mọi animation chỉ chuẩn bị một lần, trong một tiến trình con tự thoát, nên RAM dùng lúc giải mã được trả lại hết.
-- Khi phát, app ánh xạ file cache thay vì nạp vào RAM, nên Windows lấy lại vùng nhớ đó bất cứ lúc nào nó cần.
-- Mỗi khung hình chỉ giải nén và cập nhật đúng vùng thay đổi; khung hình không đổi thì app không cần thức dậy.
-- Nhiễu video được lọc khi chuẩn bị, nên phần đứng yên của hình không phải vẽ lại.
-- Animation dừng hẳn khi khoá máy, tắt màn hình, ẩn buddy hoặc có app toàn màn hình. Ảnh tĩnh không dùng timer.
+## Why it's light
+
+- Each animation is prepared once, in a child process that exits, so the memory used for decoding is all given back.
+- During playback the app maps the cache file instead of loading it into RAM, so Windows can reclaim that memory whenever
+  it needs to.
+- Each frame decompresses and updates only the area that changed; if nothing changed, the app doesn't wake up.
+- Video noise is filtered out during preparation, so still parts of the image aren't redrawn.
+- Animation stops completely when the PC is locked, the display is off, the buddy is hidden, or a full-screen app is
+  running. Still images use no timer.
 
 ## Usage
 
-Hôm nay, tuần này (từ thứ Hai), tháng này và 14 ngày gần nhất, theo giờ máy. Số liệu đếm từ transcript trong
-`%USERPROFILE%\.claude\projects` (cả subagent), chỉ đọc các con số `usage`, không đọc nội dung hội thoại. Số lớn là
-input + output + ghi cache; đọc cache tính riêng. Đếm tăng dần trong một tiến trình ngắn ở mức ưu tiên thấp. Không
-gồm Claude dùng trên máy khác hay trên web.
+Today, this week (from Monday), this month and the last 14 days, in local time. Numbers are counted from the transcripts
+in `%USERPROFILE%\.claude\projects` (subagents included), reading only the `usage` numbers and never the conversation.
+The big number is input + output + cache writes; cache reads are shown separately. Counting is incremental, in a
+short-lived low-priority process. Claude used on other machines or on the web isn't included.
 
-## Nhân vật
+## Characters
 
-Mọi nhân vật đều dùng được ngay. Thêm từ file hoặc nhập cả thư mục cùng định dạng với bản Electron (`character.json`
-và một file media cho mỗi trạng thái):
+Every character is available right away. Add your own from files, or import a folder in the same format as the original
+Electron app (`character.json` and one media file per state):
 
-| Định dạng | Ghi chú |
+| Format | Notes |
 |---|---|
-| WebM VP9 có alpha | Nền trong suốt, giải mã bằng thư viện Rust kèm app |
-| MP4 | Giải mã bằng Media Foundation của Windows, không có nền trong suốt |
-| PNG, APNG, GIF, WebP, JPG | Ảnh trắng nền có thể tách nền khi thêm |
-| SVG | Vẽ như ảnh tĩnh, hiệu ứng trong file không chạy |
+| WebM VP9 with alpha | Transparent background, decoded by a Rust library built into the app |
+| MP4 | Decoded by Windows Media Foundation, no transparent background |
+| PNG, APNG, GIF, WebP, JPG | White backgrounds can be removed when adding |
+| SVG | Drawn as a still image; effects in the file don't play |
 
-Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Mỗi file chỉ giải mã một lần rồi lưu dạng
-nén trong `cache`, nên phát lại rất nhẹ. Clip rất dài bị cắt bớt khi chuẩn bị (giới hạn 50 MB mỗi file).
+Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Each file is decoded once and stored compressed in
+`cache`, so replaying it is very light. Very long clips are cut during preparation (limit 50 MB per file).
 
-## Gỡ
+## Configuration
 
-Tắt "Kết nối Claude Code" trong Cài đặt (hoặc chạy `--remove-hooks`) trước khi xoá file exe, nếu không Claude Code
-sẽ báo lỗi hook. Nếu đã bật "Khởi động cùng Windows", hãy tắt mục này trước. Dữ liệu nằm ở `%APPDATA%\claude-buddy-rs`.
+`%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329, different from the Electron app's 47321, so both can
+run side by side). After changing the port, reconnect to Claude Code.
 
-## Cấu hình
+## Local API
 
-`%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329, khác cổng 47321 của bản Electron nên hai app
-chạy song song được). Đổi cổng thì cần kết nối lại Claude Code.
+Listens on `127.0.0.1` only. Requests with an unknown `Origin` or `Host` header are refused, so web pages can't control
+the app.
 
-## API cục bộ
-
-Chỉ nghe trên `127.0.0.1`. Từ chối request có header `Origin` hoặc `Host` lạ, để trang web không điều khiển được app.
-
-- `POST /hook`: dữ liệu hook thô của Claude Code
-- `POST /event`: sự kiện từ công cụ khác, ví dụ `{"session_id":"a","state":"working","step":"test","label":"Backend"}`
+- `POST /hook`: raw Claude Code hook data
+- `POST /event`: events from other tools, for example `{"session_id":"a","state":"working","step":"test","label":"Backend"}`
 - `GET /sessions`, `GET /usage`, `GET /health`
 
-## Phát triển
+## Development
 
 ```
 cargo test
@@ -117,12 +125,13 @@ set PREVIEW_DIR=C:\some\folder && cargo test preview -- --ignored
 cargo test export_app_icon -- --ignored
 ```
 
-Lệnh thứ hai xuất ảnh PNG của nhân vật và cửa sổ. Lệnh thứ ba tạo lại `assets/app.ico` từ logo vẽ trong code.
+The second command exports PNGs of the characters and windows. The third regenerates `assets/app.ico` from the logo drawn
+in code.
 
-Biến môi trường để kiểm tra mà không đụng dữ liệu thật: `CLAUDE_BUDDY_RS_HOME` (thư mục dữ liệu riêng, chạy song song
-được), `CLAUDE_CONFIG_DIR` (thư mục Claude), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`, `CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (không tạm dừng
-khi khoá máy, để đo CPU).
+Environment variables for testing without touching real data: `CLAUDE_BUDDY_RS_HOME` (separate data folder, can run side
+by side), `CLAUDE_CONFIG_DIR` (Claude folder), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`,
+`CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (keeps animating while locked, for measuring CPU).
 
 ## License
 
-MIT, xem [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

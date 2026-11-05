@@ -393,13 +393,21 @@ struct Blink {
     jumped: bool,
 }
 
+/// What a clone shows: frames of its own, or a built-in character drawn afresh.
+enum CloneBody {
+    Frames(Player),
+    Drawn(usize),
+}
+
 /// A shadow clone: the character again, playing on its own in a corner.
 struct Bunshin {
     sprite: Sprite,
-    player: Player,
-    /// How much its frames are stretched, and where its feet are on the sprite.
+    body: CloneBody,
+    /// How much its frames are stretched (for a drawn one, its pixel density), where its feet are on
+    /// the sprite, and how big it is there.
     k: f32,
     feet: (f32, f32),
+    size: (f32, f32),
     born: Instant,
     leave_at: Instant,
     drawn: bool,
@@ -917,9 +925,17 @@ impl App {
         if self.full_restore.is_some() || self.full_at.is_some() || !self.shown() {
             return;
         }
-        let Visual::Media { player, .. } = &self.visual else { return };
-        let (anim, k) = (player.anim.clone(), self.stretch());
-        let (dw, dh) = ((anim.w as f32 * k).ceil() as i32, (anim.h as f32 * k).ceil() as i32);
+        let (k, dw, dh) = match &self.visual {
+            Visual::Media { player, .. } => {
+                let k = self.stretch();
+                (k, (player.anim.w as f32 * k).ceil() as i32, (player.anim.h as f32 * k).ceil() as i32)
+            }
+            Visual::Vector(_) => {
+                let k = self.char_scale();
+                let s = (CHAR_SIZE * k).ceil() as i32;
+                (k, s, s)
+            }
+        };
         // Room around the character for the smoke.
         let (m, gap) = (dw.max(dh) / 4, self.gap_px());
         let (sw, sh) = (dw + 2 * m, dh + m + gap);
@@ -927,11 +943,15 @@ impl App {
         let (now, state) = (Instant::now(), state_index(self.state));
         for (i, (_, c)) in self.other_corners().into_iter().enumerate() {
             let Some(sprite) = Sprite::new(c.0 - sw / 2, c.1 + bh / 2 - (sh - gap), sw as u32, sh as u32) else { continue };
-            // Each a little ahead of the next, so they don't all move as one.
-            let player = Player::new(anim.clone(), state, now_ms().saturating_sub(137 * (i as u64 + 1)));
+            let body = match &self.visual {
+                // Each a little ahead of the next, so they don't all move as one.
+                Visual::Media { player, .. } => CloneBody::Frames(Player::new(player.anim.clone(), state, now_ms().saturating_sub(137 * (i as u64 + 1)))),
+                Visual::Vector(kind) => CloneBody::Drawn(*kind),
+            };
             let born = now + Duration::from_millis(CLONE_STAGGER_MS * i as u64);
             let leave_at = born + Duration::from_millis(CLONE_LIFE_MS);
-            self.bunshin.push(Bunshin { sprite, player, k, feet: (sw as f32 / 2.0, (sh - gap) as f32), born, leave_at, drawn: false });
+            let (feet, size) = ((sw as f32 / 2.0, (sh - gap) as f32), (dw as f32, dh as f32));
+            self.bunshin.push(Bunshin { sprite, body, k, feet, size, born, leave_at, drawn: false });
         }
         self.skill_timer();
     }
@@ -1022,7 +1042,7 @@ impl App {
             }
             self.present(None);
         }
-        let clock = now_ms();
+        let (clock, state, t) = (now_ms(), self.state, self.time());
         for b in &mut self.bunshin {
             if now < b.born {
                 continue;
@@ -1034,20 +1054,30 @@ impl App {
                 (age < SMOKE_MS).then(|| age as f32 / SMOKE_MS as f32)
             };
             let opacity = if leaving { 1.0 - gone as f32 / CLONE_FADE_MS as f32 } else { age.saturating_sub(CLONE_FADE_IN_DELAY_MS) as f32 / CLONE_FADE_MS as f32 }.clamp(0.0, 1.0);
-            let changed = b.player.advance(clock).is_some();
+            // A drawn character moves all the time.
+            let changed = match &mut b.body {
+                CloneBody::Frames(player) => player.advance(clock).is_some(),
+                CloneBody::Drawn(_) => true,
+            };
             if smoke.is_none() && !changed && b.drawn && opacity >= 1.0 {
                 continue;
             }
             b.drawn = true;
-            let Bunshin { sprite, player, k, feet, .. } = b;
-            let (fw, fh, k, feet) = (player.anim.w, player.anim.h, *k, *feet);
-            let r = fw.max(fh) as f32 * k * 0.42;
+            let Bunshin { sprite, body, k, feet, size, .. } = b;
+            let (k, feet, size) = (*k, *feet, *size);
+            let r = size.0.max(size.1) * 0.42;
             sprite.draw(|buf, w, h| {
                 if opacity > 0.0 {
-                    fx::paint_frame(buf, w, h, &player.pixels, fw, fh, k, feet, opacity);
+                    match body {
+                        CloneBody::Frames(player) => fx::paint_frame(buf, w, h, &player.pixels, player.anim.w, player.anim.h, k, feet, opacity),
+                        CloneBody::Drawn(kind) => {
+                            render::paint_character_at(buf, w, h, k, *kind, state, t, feet);
+                            fx::fade(buf, opacity);
+                        }
+                    }
                 }
                 if let Some(p) = smoke {
-                    fx::paint_smoke(buf, w, h, feet.0, feet.1 - fh as f32 * k * 0.45, r, p);
+                    fx::paint_smoke(buf, w, h, feet.0, feet.1 - size.1 * 0.45, r, p);
                 }
             });
         }
@@ -1433,7 +1463,9 @@ impl App {
                 player.set_state(state_index(state), now_ms());
             }
             for b in &mut self.bunshin {
-                b.player.set_state(state_index(state), now_ms());
+                if let CloneBody::Frames(player) = &mut b.body {
+                    player.set_state(state_index(state), now_ms());
+                }
             }
         }
         self.note_state_changes();

@@ -597,6 +597,15 @@ pub fn paint_character(buf: &mut [u8], w: u32, h: u32, scale: f32, kind: usize, 
     dirty
 }
 
+/// The character alone, standing at `feet`: for a copy of it in a window of its own.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_character_at(buf: &mut [u8], w: u32, h: u32, scale: f32, kind: usize, state: State, t: f32, feet: (f32, f32)) {
+    let Some(mut pm) = PixmapMut::from_bytes(buf, w, h) else { return };
+    let size = CHAR_SIZE * scale;
+    let base = Transform::from_translate(feet.0 - size / 2.0, feet.1 - size).pre_scale(size / 200.0, size / 200.0);
+    draw_character(&mut pm, base, kind, state, t);
+}
+
 // ---- text ----
 
 #[derive(Clone, Copy)]

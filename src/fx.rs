@@ -108,6 +108,17 @@ pub fn paint_frame(buf: &mut [u8], w: u32, h: u32, pixels: &[u8], fw: u32, fh: u
     pm.draw_pixmap(0, 0, src, &PixmapPaint { opacity: opacity.clamp(0.0, 1.0), blend_mode: BlendMode::SourceOver, quality }, tf, None);
 }
 
+/// Everything drawn so far, `opacity` as strong. The pixels are premultiplied, so every channel scales.
+pub fn fade(buf: &mut [u8], opacity: f32) {
+    if opacity >= 1.0 {
+        return;
+    }
+    let k = (opacity.max(0.0) * 256.0) as u32;
+    for b in buf {
+        *b = ((*b as u32 * k) >> 8) as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +149,15 @@ mod tests {
         let mut buf = vec![0u8; 64 * 64 * 4];
         paint_mark(&mut buf, 64, 64, 0.2);
         assert!(lit(&buf) > 50);
+    }
+
+    #[test]
+    fn fading_keeps_colours_premultiplied() {
+        let mut buf = vec![200, 100, 50, 200];
+        fade(&mut buf, 0.5);
+        assert_eq!(buf, vec![100, 50, 25, 100]);
+        fade(&mut buf, 0.0);
+        assert_eq!(buf, vec![0; 4]);
     }
 
     #[test]

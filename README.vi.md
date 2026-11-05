@@ -78,8 +78,8 @@ Lệnh này xoá app, mục mở khi đăng nhập và hook. Cài đặt, số l
 | Bấm bong bóng | Mở cửa sổ của phiên cần chú ý nhất |
 | Bấm một dòng phiên | Mở cửa sổ terminal/IDE của phiên đó |
 | Kéo nhân vật | Tới bất kỳ đâu trên màn hình; vị trí được ghi nhớ |
-| Lăn chuột trên nhân vật | Phóng to hoặc thu nhỏ, tối đa bằng màn hình |
-| Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R | Skill: dịch chuyển sang góc khác / phân thân ở các góc / toàn màn hình và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
+| Lăn chuột trên nhân vật (Windows) | Phóng to hoặc thu nhỏ, tối đa bằng màn hình |
+| Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R (Windows) | Skill: dịch chuyển sang góc khác / phân thân ở các góc / toàn màn hình và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
 | Chuột phải nhân vật hoặc icon khay | Menu nhanh |
 | Bấm icon khay (Windows) | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
 | Bấm icon thanh menu (macOS) | Menu nhanh, mở cửa sổ chính bằng **Quản lý nhân vật**, **Xem mức dùng** và **Cài đặt** |
@@ -94,6 +94,7 @@ Giao diện có tiếng Anh và tiếng Việt, mặc định theo hệ thống;
 
 - Mở một phiên sẽ đưa terminal hoặc IDE của phiên đó ra trước, nhưng chưa chọn được đúng cửa sổ nếu chương trình có nhiều cửa sổ.
 - Chưa có nền cửa sổ trong mờ.
+- Chưa có lăn chuột để đổi cỡ, skill và `autoSkills`.
 - Thông báo được gửi qua công cụ script của hệ thống, nên macOS có thể hỏi quyền hoặc hiện tên công cụ đó.
 
 ## Không che và không làm phiền
@@ -146,9 +147,9 @@ thái):
 
 Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
-Ảnh lớn hơn cỡ thường (ví dụ 1024 pixel) vẫn nét khi phóng to nhân vật hoặc toàn màn hình.
+Trên Windows, ảnh lớn hơn cỡ thường (ví dụ 1024 pixel) vẫn nét khi phóng to nhân vật hoặc toàn màn hình.
 
-Thêm `"autoSkills": true` vào `character.json` thì nhân vật tự dùng skill:
+Trên Windows, thêm `"autoSkills": true` vào `character.json` thì nhân vật tự dùng skill:
 
 | Khi | Skill |
 |---|---|
@@ -163,7 +164,7 @@ trong menu chuột phải (**Tự dùng skill theo phiên**).
 
 `config.json` trong `%APPDATA%\claude-buddy-rs` trên Windows hoặc `~/Library/Application Support/claude-buddy-rs` trên
 macOS, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
-Mục `autoCloneSeconds` (mặc định 20) là số giây các phiên làm việc trước khi phân thân xuất hiện.
+Trên Windows, mục `autoCloneSeconds` (mặc định 20) là số giây các phiên làm việc trước khi phân thân xuất hiện.
 
 ## API cục bộ
 

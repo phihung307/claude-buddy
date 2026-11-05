@@ -649,7 +649,7 @@ impl Picker {
         for (i, l) in labels.iter().enumerate() {
             cx = g.chip(cx, ry + 16.0, l, s.language == i as u8, Action::Set(Setting::Language(i as u8)), &hover, hits) + 4.0;
         }
-        let ry = row(g, ICON_RESIZE, t("Kích thước nhân vật", "Character size"), t("Hoặc lăn chuột trên nhân vật; trỏ vào nhân vật: Ctrl+Q/W/R (ở nơi khác thêm Alt)", "Or scroll on the character; pointing at it: Ctrl+Q/W/R (elsewhere add Alt)"), &mut y);
+        let ry = row(g, ICON_RESIZE, t("Kích thước nhân vật", "Character size"), if cfg!(windows) { t("Hoặc lăn chuột trên nhân vật; trỏ vào nhân vật: Ctrl+Q/W/R (ở nơi khác thêm Alt)", "Or scroll on the character; pointing at it: Ctrl+Q/W/R (elsewhere add Alt)") } else { t("Nhân vật càng nhỏ càng ít che màn hình", "A smaller character covers less of your screen") }, &mut y);
         let labels = [t("Nhỏ", "Small"), t("Vừa", "Medium"), t("Lớn", "Large")];
         let mut cx = x + w - 16.0 - labels.iter().map(|l| g.chip_w(l) + 4.0).sum::<f32>();
         for (i, l) in labels.iter().enumerate() {

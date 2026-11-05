@@ -428,7 +428,7 @@ pub fn char_rect(w: u32, h: u32, scale: f32) -> (u32, u32, u32, u32) {
 }
 
 /// Logical size of the area a media character needs, motion included.
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 pub fn media_region(stage_w: u32, stage_h: u32, scale: f32) -> (f32, f32) {
     media_region_in(stage_w as f32, stage_h as f32, scale, WIN_W)
 }
@@ -542,7 +542,7 @@ pub fn paint_media(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw
 }
 
 /// `room`: keep the margins motion needs. Characters that never move on their own stage don't.
-#[cfg(test)]
+#[cfg(any(test, target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 pub fn paint_stage(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw: u32, fh: u32, xf: Xform, badge: Option<State>, t: f32, off: (i32, i32), room: bool) -> (u32, u32, u32, u32) {
     paint_stage_zoomed(buf, w, h, scale, pixels, fw, fh, xf, badge, t, off, room, 1.0)

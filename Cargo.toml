@@ -1,6 +1,6 @@
 [package]
 name = "claude-buddy-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Lightweight native desktop companion that shows Claude Code session status"
 license = "MIT"

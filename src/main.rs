@@ -50,3 +50,18 @@ fn main() {
         _ => window::run(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // The details Explorer shows come from app.rc, which Cargo can't fill in, so a version bump has to touch both.
+    #[test]
+    fn file_details_match_the_package_version() {
+        let rc = include_str!("../app.rc");
+        let version = env!("CARGO_PKG_VERSION");
+        let numbers = format!("{},0", version.replace('.', ","));
+        assert!(rc.contains(&format!("\"FileVersion\", \"{version}\"")));
+        assert!(rc.contains(&format!("\"ProductVersion\", \"{version}\"")));
+        assert!(rc.contains(&format!("FILEVERSION {numbers}")));
+        assert!(rc.contains(&format!("PRODUCTVERSION {numbers}")));
+    }
+}

@@ -604,11 +604,14 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-/// Each system draws its own text; nothing outside Windows has a window to draw it in yet.
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub use crate::text_mac::TextDrawer;
+
+/// Linux has no window to draw it in yet.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub struct TextDrawer;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl TextDrawer {
     pub fn new(_scale: f32) -> TextDrawer {
         TextDrawer
@@ -751,7 +754,7 @@ impl Drop for TextDrawer {
 const SUBPIXEL_MIN_ALPHA: u32 = 170;
 
 #[allow(clippy::too_many_arguments)]
-fn blend_mask(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, bw: i32, bh: i32, mask: &[u8], color: u32, dark_text: bool) {
+pub(crate) fn blend_mask(buf: &mut [u8], w: u32, h: u32, x: i32, y: i32, bw: i32, bh: i32, mask: &[u8], color: u32, dark_text: bool) {
     let (r, g, b) = rgb(color);
     let src = [b as u32, g as u32, r as u32];
     for my in 0..bh {
@@ -1271,7 +1274,7 @@ pub mod tests {
         assert!(rows.iter().all(|r| r.y + r.h <= bubble.y), "rows overlap the bubble");
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn text_is_solid_and_keeps_its_colour_on_any_surface() {
         let (w, h) = (120u32, 40u32);

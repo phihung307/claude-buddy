@@ -1,8 +1,10 @@
 //! The character picker window, plus its add/edit dialog. It exists only while open, so none of this
 //! costs anything the rest of the time. Drawn the same way as the buddy (no toolkit, no browser);
-//! only the two text boxes are real Windows controls, so typing methods and shortcuts behave normally.
+//! only the two text boxes are the system's own controls, so typing methods and shortcuts behave normally.
+//! Everything that talks to the system is in `host`.
 //! Slow work (decoding, copying) runs on worker threads that post their results back.
 
+use crate::host::{self, Edit, Surface, Win};
 use crate::i18n::{self, grouped, t};
 use crate::anim::{self, CharAnim, Player, THUMB_SIZE};
 use crate::library::{self, Character, Draft, Slot, Source, STATE_KEYS, state_text};
@@ -19,37 +21,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::fs;
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-use windows_sys::Win32::Foundation::GlobalFree;
-use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tiny_skia::{FillRule, PixmapMut, Transform};
-use windows_sys::core::w;
-use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::Dialogs::*;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
-use windows_sys::Win32::UI::Shell::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-const WM_JOB_DONE: u32 = WM_APP + 20;
-const WM_REFRESH: u32 = WM_APP + 21;
-const WM_MOUSELEAVE: u32 = 0x02A3;
-const EN_CHANGE: u32 = 0x0300;
-const ES_AUTOHSCROLL: u32 = 0x0080;
-const ID_NAME: usize = 201;
-const ID_PROMPT: usize = 202;
-const CF_UNICODETEXT: u32 = 13;
-const ES_MULTILINE: u32 = 0x0004;
-const ES_AUTOVSCROLL: u32 = 0x0040;
-const ES_WANTRETURN: u32 = 0x1000;
 const GENERATE_W: f32 = 620.0;
 const GENERATE_H: f32 = 320.0;
-const TIMER_PREVIEW: usize = 1;
 const PREVIEW_FRAME_MS: u32 = 33;
 const TOAST_MS: u64 = 2600;
 const SIDEBAR_W: f32 = 208.0;
@@ -63,7 +41,7 @@ fn hero_actions() -> [&'static str; 3] {
     HERO_ACTIONS[if crate::i18n::vi() { 0 } else { 1 }]
 }
 /// The window can't get narrower than this, so that row always fits.
-const MIN_WINDOW_W: f32 = 1080.0;
+pub(crate) const MIN_WINDOW_W: f32 = 1080.0;
 /// Enough for a slot showing everything it can: preview, file, kind, motion, background and remove.
 const DIALOG_H: f32 = 510.0;
 // Segoe Fluent Icons / Segoe MDL2 Assets
@@ -105,13 +83,13 @@ static RESULTS: Mutex<Vec<JobResult>> = Mutex::new(Vec::new());
 static HWND_OPEN: AtomicIsize = AtomicIsize::new(0);
 
 /// The window while it's open, otherwise null.
-pub fn window() -> HWND {
-    HWND_OPEN.load(Ordering::Acquire) as HWND
+pub fn window() -> Win {
+    HWND_OPEN.load(Ordering::Acquire) as Win
 }
 
 fn finish_job(hwnd: isize, r: JobResult) {
     RESULTS.lock().unwrap().push(r);
-    unsafe { PostMessageW(hwnd as HWND, WM_JOB_DONE, 0, 0) };
+    host::post_job(hwnd);
 }
 
 fn spawn(work: impl FnOnce() + Send + 'static) {
@@ -211,7 +189,8 @@ impl Dialog {
 }
 
 struct Picker {
-    hwnd: HWND,
+    hwnd: Win,
+    surface: Surface,
     canvas: Canvas,
     backdrop: Backdrop,
     text: Rc<TextDrawer>,
@@ -241,11 +220,9 @@ struct Picker {
     state_since: Instant,
     toast: Option<(String, u64)>,
     dialog: Option<Dialog>,
-    edit_name: HWND,
-    edit_prompt: HWND,
+    edit_name: Edit,
+    edit_prompt: Edit,
     generating: Option<Generating>,
-    edit_font: HFONT,
-    edit_brush: HBRUSH,
     dragging_scale: bool,
     slider: (f32, f32),
 }
@@ -258,44 +235,17 @@ fn with<R>(f: impl FnOnce(&mut Picker) -> R) -> Option<R> {
     PICKER.with(|p| p.try_borrow_mut().ok().and_then(|mut b| b.as_mut().map(f)))
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn colorref(rgb: u32) -> u32 {
-    (rgb & 0xff) << 16 | (rgb & 0xff00) | (rgb >> 16 & 0xff)
-}
-
-fn get_window_text(h: HWND) -> String {
-    unsafe {
-        let n = GetWindowTextLengthW(h);
-        let mut b = vec![0u16; n as usize + 1];
-        let got = GetWindowTextW(h, b.as_mut_ptr(), b.len() as i32);
-        String::from_utf16_lossy(&b[..got.max(0) as usize])
-    }
-}
-
-pub fn open_folder(dir: &Path) {
-    let d = wide(&dir.display().to_string());
-    unsafe { ShellExecuteW(std::ptr::null_mut(), w!("open"), d.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
-}
-
-/// The text box keeps keys to itself, so the app's message loop hands Esc over from there.
-pub fn forward_escape(target: HWND) -> bool {
-    let open = HWND_OPEN.load(Ordering::Relaxed);
-    if open == 0 || unsafe { GetParent(target) } != open as HWND {
-        return false;
-    }
-    unsafe { PostMessageW(open as HWND, WM_KEYDOWN, 0x1B, 0) };
-    true
-}
+#[cfg(windows)]
+pub use host::open_folder;
+#[cfg(windows)]
+pub use host::forward_escape;
 
 /// Something changed that the picker shows, e.g. a session count or the current character.
 pub fn notify_changed() {
     // The picker may be the one in use further up the stack, so this only ever posts.
     let h = HWND_OPEN.load(Ordering::Relaxed);
     if h != 0 {
-        unsafe { PostMessageW(h as HWND, WM_REFRESH, 0, 0) };
+        host::post_refresh(h);
     }
 }
 
@@ -307,137 +257,57 @@ pub fn open(page: u8) {
         p.hwnd
     });
     if let Some(h) = existing {
-        unsafe {
-            if IsIconic(h) != 0 {
-                ShowWindow(h, SW_RESTORE);
-            }
-            SetForegroundWindow(h);
-        }
+        host::bring_forward(h);
         return;
     }
     let Some(snapshot) = window::library_snapshot() else { return };
-    unsafe {
-        let instance = GetModuleHandleW(std::ptr::null());
-        let class = w!("ClaudeBuddyRSPicker");
-        let mut wc: WNDCLASSW = std::mem::zeroed();
-        wc.lpfnWndProc = Some(wnd_proc);
-        wc.hInstance = instance;
-        wc.lpszClassName = class;
-        wc.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
-        wc.hIcon = LoadIconW(instance, 1 as *const u16);
-        RegisterClassW(&wc); // already registered on later opens: harmless
-
-        let hwnd = CreateWindowExW(
-            WS_EX_ACCEPTFILES,
-            class,
-            w!("Claude Buddy"),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            100,
-            100,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            instance,
-            std::ptr::null(),
-        );
-        if hwnd.is_null() {
-            return;
-        }
-        let backdrop = theme::apply_backdrop(hwnd);
-        let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
-        let (w, h) = ((1100.0 * scale) as u32, (820.0 * scale) as u32);
-        let Some(canvas) = Canvas::new(w.max(1), h.max(1)) else {
-            DestroyWindow(hwnd);
-            return;
-        };
-        let face = w!("Segoe UI");
-        let edit_font = CreateFontW(-(14.0 * scale).round() as i32, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face);
-        let make_edit = |id: usize, style: u32| {
-            let e = CreateWindowExW(
-                0, // the border is drawn with the rest of the page, in the Windows 11 style
-                w!("EDIT"),
-                w!(""),
-                WS_CHILD | WS_TABSTOP | style,
-                0,
-                0,
-                10,
-                10,
-                hwnd,
-                id as HMENU,
-                instance,
-                std::ptr::null(),
-            );
-            SendMessageW(e, WM_SETFONT, edit_font as WPARAM, 1);
-            // GDI leaves alpha at zero where it draws, which over Mica makes the typed text vanish. A
-            // layered child is composited as fully opaque instead.
-            SetWindowLongPtrW(e, GWL_EXSTYLE, GetWindowLongPtrW(e, GWL_EXSTYLE) | WS_EX_LAYERED as isize);
-            SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
-            e
-        };
-        let edit_name = make_edit(ID_NAME, ES_AUTOHSCROLL);
-        SendMessageW(edit_name, 0x00C5 /* EM_LIMITTEXT */, 60, 0);
-        let edit_prompt = make_edit(ID_PROMPT, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL);
-        SendMessageW(edit_prompt, 0x00C5 /* EM_LIMITTEXT */, crate::codex::MAX_DESCRIPTION, 0);
-
-        let selected = snapshot.current.clone();
-        let picker = Picker {
-            hwnd,
-            canvas,
-            backdrop,
-            text: Rc::new(TextDrawer::new_ui(scale)),
-            scale,
-            characters: snapshot.characters,
-            current: snapshot.current,
-            usage: snapshot.usage,
-            usage_ready: snapshot.usage_ready,
-            page,
-            settings: window::settings_view().unwrap_or_default(),
-            selected,
-            preview_state: 0,
-            sort_by_name: false,
-            scroll: 0.0,
-            hits: Vec::new(),
-            hover: None,
-            tracking: false,
-            thumbs: HashMap::new(),
-            thumbs_asked: HashMap::new(),
-            player: None,
-            preview_error: None,
-            preview_token: 0,
-            preview_loading: false,
-            stage: (0, 0, 0, 0),
-            started: Instant::now(),
-            state_since: Instant::now(),
-            toast: None,
-            dialog: None,
-            edit_prompt,
-            generating: None,
-            edit_name,
-            edit_font,
-            edit_brush: CreateSolidBrush(colorref(pal().surface)),
-            dragging_scale: false,
-            slider: (0.0, 0.0),
-        };
-        PICKER.with(|p| *p.borrow_mut() = Some(picker));
-        HWND_OPEN.store(hwnd as isize, Ordering::Relaxed);
-        with(|p| {
-            p.ask_thumbs();
-            p.load_preview();
-        });
-        // Centered in the space the taskbar leaves, on the screen you are working on.
-        let mut cursor = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut cursor);
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mut mi);
-        let a = mi.rcWork;
-        let (fw, fh) = ((w as i32).min(a.right - a.left), (h as i32).min(a.bottom - a.top));
-        SetWindowPos(hwnd, std::ptr::null_mut(), a.left + (a.right - a.left - fw) / 2, a.top + (a.bottom - a.top - fh) / 2, fw, fh, SWP_NOZORDER);
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
-        SetTimer(hwnd, TIMER_PREVIEW, PREVIEW_FRAME_MS, None);
-    }
+    let Some(made) = host::create_window() else { return };
+    let (hwnd, size) = (made.hwnd, (made.canvas.w, made.canvas.h));
+    let selected = snapshot.current.clone();
+    let picker = Picker {
+        hwnd,
+        surface: made.surface,
+        canvas: made.canvas,
+        backdrop: made.backdrop,
+        text: Rc::new(TextDrawer::new_ui(made.scale)),
+        scale: made.scale,
+        characters: snapshot.characters,
+        current: snapshot.current,
+        usage: snapshot.usage,
+        usage_ready: snapshot.usage_ready,
+        page,
+        settings: window::settings_view().unwrap_or_default(),
+        selected,
+        preview_state: 0,
+        sort_by_name: false,
+        scroll: 0.0,
+        hits: Vec::new(),
+        hover: None,
+        tracking: false,
+        thumbs: HashMap::new(),
+        thumbs_asked: HashMap::new(),
+        player: None,
+        preview_error: None,
+        preview_token: 0,
+        preview_loading: false,
+        stage: (0, 0, 0, 0),
+        started: Instant::now(),
+        state_since: Instant::now(),
+        toast: None,
+        dialog: None,
+        edit_prompt: made.edit_prompt,
+        generating: None,
+        edit_name: made.edit_name,
+        dragging_scale: false,
+        slider: (0.0, 0.0),
+    };
+    PICKER.with(|p| *p.borrow_mut() = Some(picker));
+    HWND_OPEN.store(hwnd as isize, Ordering::Relaxed);
+    with(|p| {
+        p.ask_thumbs();
+        p.load_preview();
+    });
+    host::show_window(hwnd, size, PREVIEW_FRAME_MS);
 }
 
 impl Picker {
@@ -511,7 +381,7 @@ impl Picker {
     }
 
     fn invalidate(&self) {
-        unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        host::invalidate(self.hwnd);
     }
 
     fn refresh(&mut self, focus: Option<&str>) {
@@ -1058,7 +928,7 @@ impl Picker {
         g.label(dx + 18.0, dy + 46.0, dw - 36.0, 20.0, heading, Font::Bold, pal().ink);
         g.label(dx + 18.0, dy + 66.0, dw - 36.0, 18.0, example, Font::Small, pal().muted);
         // The text box itself is placed in place_edits().
-        let focused = unsafe { GetFocus() } == self.edit_prompt;
+        let focused = self.edit_prompt.is_focused();
         let (ex, ey, ew, eh) = (dx + 18.0, dy + 90.0, dw - 36.0, 118.0);
         g.rrect(ex, ey, ew, eh, 4.0, pal().surface);
         g.stroke_rrect(ex, ey, ew, eh, 4.0, pal().stroke, 1.0);
@@ -1095,21 +965,21 @@ impl Picker {
 
     fn open_generate(&mut self, redrawing: Option<Character>) {
         self.generating = Some(Generating { running: false, error: String::new(), started: std::time::Instant::now(), done: Arc::new(AtomicUsize::new(0)), cancel: Arc::new(AtomicBool::new(false)), shown: (0, 0), redrawing, info: String::new() });
-        unsafe { SetWindowTextW(self.edit_prompt, wide("").as_ptr()) };
+        self.edit_prompt.set_text("");
         self.place_edits();
-        unsafe { SetFocus(self.edit_prompt) };
+        self.edit_prompt.focus();
         self.invalidate();
     }
 
     fn copy_chatgpt_prompt(&mut self) {
-        let description = get_window_text(self.edit_prompt);
+        let description = self.edit_prompt.text();
         let hwnd = self.hwnd;
         let Some(gen) = self.generating.as_mut() else { return };
         gen.error.clear();
         gen.info.clear();
         if description.trim().is_empty() {
             gen.error = t("Hãy mô tả nhân vật bạn muốn.", "Describe the character you want.").into();
-        } else if copy_text(hwnd, &crate::codex::chatgpt_prompt_for(&description)) {
+        } else if host::copy_text(hwnd, &crate::codex::chatgpt_prompt_for(&description)) {
             gen.info = t("Đã sao chép. Dán vào ChatGPT, tải file zip về rồi kéo vào cửa sổ này.", "Copied. Paste it into ChatGPT, download the ZIP, then drag it onto this window.").into();
         } else {
             gen.error = t("Không sao chép được, hãy thử lại.", "Could not copy it, try again.").into();
@@ -1131,7 +1001,7 @@ impl Picker {
 
     /// Everything after the button runs on a worker: drawing takes minutes.
     fn start_generate(&mut self) {
-        let description = get_window_text(self.edit_prompt);
+        let description = self.edit_prompt.text();
         let hwnd = self.hwnd as isize;
         let Some(gen) = self.generating.as_mut() else { return };
         if description.trim().is_empty() {
@@ -1182,7 +1052,7 @@ impl Picker {
         let y = dy + 50.0;
         g.label(dx + 18.0, y, 40.0, 32.0, t("Tên", "Name"), Font::Bold, pal().ink);
         // The text box's frame, with the accent line Windows 11 inputs have
-        let focused = unsafe { GetFocus() } == self.edit_name;
+        let focused = self.edit_name.is_focused();
         g.rrect(dx + 56.0, y, 214.0, 32.0, 4.0, pal().surface);
         g.stroke_rrect(dx + 56.0, y, 214.0, 32.0, 4.0, pal().stroke, 1.0);
         g.rect(dx + 58.0, y + 30.0, 210.0, if focused { 2.0 } else { 1.0 }, if focused { pal().accent } else { pal().muted });
@@ -1238,7 +1108,7 @@ impl Picker {
         // Slots, or the manifest they would produce
         let area = (dx + 18.0, zy + 56.0, dw - 36.0, my - (zy + 56.0) - 4.0);
         if d.show_json {
-            let name = get_window_text(self.edit_name);
+            let name = self.edit_name.text();
             let id = d.editing.as_ref().map_or_else(|| library::slugify(&name), |c| c.id.clone());
             let draft = d.draft(&name);
             let exts = std::array::from_fn(|i| d.slots[i].as_ref().and_then(|s| if s.remove_white { Some(".png".to_string()) } else { s.ext.clone() }));
@@ -1314,25 +1184,20 @@ impl Picker {
     fn place_edits(&mut self) {
         let k = self.k();
         let (lw, lh) = self.logical();
-        let show = self.dialog.is_some();
-        unsafe {
-            if show {
-                let (dw, dh) = (lw.min(920.0) - 32.0, (lh - 32.0).min(DIALOG_H));
-                let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
-                let y = (dy + 50.0) * k;
-                let (eh, flags) = ((20.0 * k) as i32, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                SetWindowPos(self.edit_name, std::ptr::null_mut(), ((dx + 64.0) * k) as i32, (y + 6.0 * k) as i32, (198.0 * k) as i32, eh, flags);
-            } else {
-                ShowWindow(self.edit_name, SW_HIDE);
-            }
-            if self.generating.as_ref().is_some_and(|g| !g.running) {
-                let (dw, dh) = (GENERATE_W.min(lw - 32.0), GENERATE_H.min(lh - 32.0));
-                let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
-                let flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW;
-                SetWindowPos(self.edit_prompt, std::ptr::null_mut(), ((dx + 24.0) * k) as i32, ((dy + 96.0) * k) as i32, ((dw - 48.0) * k) as i32, (104.0 * k) as i32, flags);
-            } else {
-                ShowWindow(self.edit_prompt, SW_HIDE);
-            }
+        if self.dialog.is_some() {
+            let (dw, dh) = (lw.min(920.0) - 32.0, (lh - 32.0).min(DIALOG_H));
+            let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
+            let y = (dy + 50.0) * k;
+            self.edit_name.place(Some((((dx + 64.0) * k) as i32, (y + 6.0 * k) as i32, (198.0 * k) as i32, (20.0 * k) as i32)));
+        } else {
+            self.edit_name.place(None);
+        }
+        if self.generating.as_ref().is_some_and(|g| !g.running) {
+            let (dw, dh) = (GENERATE_W.min(lw - 32.0), GENERATE_H.min(lh - 32.0));
+            let (dx, dy) = ((lw - dw) / 2.0, (lh - dh) / 2.0);
+            self.edit_prompt.place(Some((((dx + 24.0) * k) as i32, ((dy + 96.0) * k) as i32, ((dw - 48.0) * k) as i32, (104.0 * k) as i32)));
+        } else {
+            self.edit_prompt.place(None);
         }
     }
 
@@ -1382,15 +1247,12 @@ impl Picker {
             }
             None => (String::new(), 1.0),
         };
-        unsafe {
-            let n = wide(&name);
-            SetWindowTextW(self.edit_name, n.as_ptr());
-        }
+        self.edit_name.set_text(&name);
         self.dialog = Some(Dialog { editing, scale: scale.clamp(0.5, 1.5), slots, error: String::new(), show_json: false, saving: false, tokens: [0; 5] });
         self.ask_kept_thumbs();
         self.add_files(files);
         self.invalidate();
-        unsafe { SetFocus(self.edit_name) };
+        self.edit_name.focus();
     }
 
     /// Current files of a character being edited get their previews too.
@@ -1453,7 +1315,7 @@ impl Picker {
     }
 
     fn start_save(&mut self) {
-        let name = get_window_text(self.edit_name);
+        let name = self.edit_name.text();
         let hwnd = self.hwnd as isize;
         let taken: Vec<String> = self.characters.iter().map(|c| c.id.clone()).collect();
         let Some(d) = self.dialog.as_mut() else { return };
@@ -1542,7 +1404,7 @@ impl Picker {
                     let redrew = self.generating.as_ref().is_some_and(|g| g.redrawing.is_some());
                     self.generating = None;
                     self.place_edits();
-                    unsafe { SetWindowTextW(self.edit_prompt, wide("").as_ptr()) };
+                    self.edit_prompt.set_text("");
                     if redrew {
                         anim::forget(&id);
                     }
@@ -1588,7 +1450,7 @@ impl Picker {
                 d.saving = false;
                 match result {
                     Ok((id, edited)) => {
-                        let name = get_window_text(self.edit_name);
+                        let name = self.edit_name.text();
                         let was_edit = edited.is_some();
                         self.dialog = None;
                         anim::forget(&id);
@@ -1885,29 +1747,7 @@ impl Gfx<'_> {
     }
 }
 
-// ---- dialogs that block in their own message loop: only ever called with no borrow held ----
-
-fn pick_files(owner: HWND, multi: bool) -> Vec<PathBuf> {
-    let filter: Vec<u16> = t("Ảnh và video\0*.webm;*.mp4;*.png;*.apng;*.gif;*.webp;*.svg;*.jpg;*.jpeg\0Mọi file\0*.*\0\0", "Images and videos\0*.webm;*.mp4;*.png;*.apng;*.gif;*.webp;*.svg;*.jpg;*.jpeg\0All files\0*.*\0\0").encode_utf16().collect();
-    let mut buffer = vec![0u16; 32 * 1024];
-    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    ofn.hwndOwner = owner;
-    ofn.lpstrFilter = filter.as_ptr();
-    ofn.lpstrFile = buffer.as_mut_ptr();
-    ofn.nMaxFile = buffer.len() as u32;
-    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY | if multi { OFN_ALLOWMULTISELECT } else { 0 };
-    if unsafe { GetOpenFileNameW(&mut ofn) } == 0 {
-        return Vec::new();
-    }
-    // One file: its full path. Several: the folder, then each name, zero-separated.
-    let parts: Vec<String> = buffer.split(|c| *c == 0).take_while(|p| !p.is_empty()).map(String::from_utf16_lossy).collect();
-    match parts.as_slice() {
-        [] => Vec::new(),
-        [one] => vec![PathBuf::from(one)],
-        [dir, names @ ..] => names.iter().map(|n| Path::new(dir).join(n)).collect(),
-    }
-}
+// Dialogs block in their own message loop, so they are only ever called with no borrow held.
 
 /// Where a generated character's sheets and Codex conversation are kept, outside the character itself, so they
 /// can be worked on again and never get shared along with it.
@@ -2003,53 +1843,6 @@ fn character_from_zip(path: &Path, taken: &[String]) -> Result<String, String> {
     finish
 }
 
-fn copy_text(owner: HWND, text: &str) -> bool {
-    let wide_text = wide(text);
-    let bytes = wide_text.len() * 2;
-    unsafe {
-        if OpenClipboard(owner) == 0 {
-            return false;
-        }
-        EmptyClipboard();
-        let block = GlobalAlloc(GMEM_MOVEABLE, bytes);
-        let mut ok = false;
-        if !block.is_null() {
-            let target = GlobalLock(block) as *mut u16;
-            if !target.is_null() {
-                std::ptr::copy_nonoverlapping(wide_text.as_ptr(), target, wide_text.len());
-                GlobalUnlock(block);
-                // The clipboard owns the memory once this succeeds.
-                ok = !SetClipboardData(CF_UNICODETEXT, block as _).is_null();
-            }
-            if !ok {
-                GlobalFree(block);
-            }
-        }
-        CloseClipboard();
-        ok
-    }
-}
-
-fn pick_save_file(owner: HWND, suggested: &str) -> Option<PathBuf> {
-    let filter: Vec<u16> = t("Nhân vật Claude Buddy\0*.buddy\0\0", "Claude Buddy character\0*.buddy\0\0").encode_utf16().collect();
-    let extension = wide(library::PACK_EXTENSION);
-    let mut buffer: Vec<u16> = suggested.encode_utf16().collect();
-    buffer.resize(4096, 0);
-    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    ofn.hwndOwner = owner;
-    ofn.lpstrFilter = filter.as_ptr();
-    ofn.lpstrFile = buffer.as_mut_ptr();
-    ofn.nMaxFile = buffer.len() as u32;
-    ofn.lpstrDefExt = extension.as_ptr();
-    ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
-    if unsafe { GetSaveFileNameW(&mut ofn) } == 0 {
-        return None;
-    }
-    let end = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
-    Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
-}
-
 /// Whether a path is a shared character rather than media to build one from.
 pub fn is_pack(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case(library::PACK_EXTENSION))
@@ -2069,64 +1862,20 @@ pub fn import_pack(path: &Path) {
                 p.toast(t("Đã thêm nhân vật được chia sẻ", "Added the shared character"));
             });
         }
-        Err(e) => show_error(hwnd, t("Thêm nhân vật", "Add character"), &crate::tf!("Không thêm được nhân vật.\n\n{e}", "Could not add the character.\n\n{e}")),
+        Err(e) => host::show_error(hwnd, t("Thêm nhân vật", "Add character"), &crate::tf!("Không thêm được nhân vật.\n\n{e}", "Could not add the character.\n\n{e}")),
     }
 }
 
-fn pick_folder(owner: HWND) -> Option<PathBuf> {
-    let title = wide(t("Chọn thư mục nhân vật", "Choose a character folder"));
-    let mut info: BROWSEINFOW = unsafe { std::mem::zeroed() };
-    info.hwndOwner = owner;
-    info.lpszTitle = title.as_ptr();
-    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    unsafe {
-        let list = SHBrowseForFolderW(&info);
-        if list.is_null() {
-            return None;
-        }
-        let mut path = vec![0u16; 1024];
-        let ok = SHGetPathFromIDListW(list, path.as_mut_ptr());
-        windows_sys::Win32::System::Com::CoTaskMemFree(list as *const _);
-        if ok == 0 {
-            return None;
-        }
-        let n = path.iter().position(|c| *c == 0).unwrap_or(path.len());
-        Some(PathBuf::from(String::from_utf16_lossy(&path[..n])))
+fn pick_motion(owner: Win, index: usize, kind: Kind, current: Option<Motion>) -> Option<Option<Motion>> {
+    let mut items = vec![(crate::tf!("tự động ({})", "automatic ({})", default_motion(index, kind).name()), current.is_none())];
+    items.extend(motion::ALL.iter().map(|x| (format!("{} ({})", x.name(), x.text()), current == Some(*x))));
+    match host::popup_choice(owner, &items)? {
+        0 => Some(None),
+        n => motion::ALL.get(n - 1).map(|x| Some(*x)),
     }
 }
 
-fn confirm(owner: HWND, title: &str, message: &str) -> bool {
-    let (t, m) = (wide(title), wide(message));
-    unsafe { MessageBoxW(owner, m.as_ptr(), t.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES }
-}
-
-fn show_error(owner: HWND, title: &str, message: &str) {
-    let (t, m) = (wide(title), wide(message));
-    unsafe { MessageBoxW(owner, m.as_ptr(), t.as_ptr(), MB_OK | MB_ICONERROR) };
-}
-
-fn pick_motion(owner: HWND, index: usize, kind: Kind, current: Option<Motion>) -> Option<Option<Motion>> {
-    unsafe {
-        let m = CreatePopupMenu();
-        let auto = wide(&crate::tf!("tự động ({})", "automatic ({})", default_motion(index, kind).name()));
-        AppendMenuW(m, MF_STRING | if current.is_none() { MF_CHECKED } else { MF_UNCHECKED }, 1, auto.as_ptr());
-        for (i, x) in motion::ALL.iter().enumerate() {
-            let l = wide(&format!("{} ({})", x.name(), x.text()));
-            AppendMenuW(m, MF_STRING | if current == Some(*x) { MF_CHECKED } else { MF_UNCHECKED }, i + 2, l.as_ptr());
-        }
-        let mut p = POINT { x: 0, y: 0 };
-        GetCursorPos(&mut p);
-        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, owner, std::ptr::null());
-        DestroyMenu(m);
-        match cmd {
-            0 => None,
-            1 => Some(None),
-            n => motion::ALL.get(n as usize - 2).map(|x| Some(*x)),
-        }
-    }
-}
-
-fn run_action(hwnd: HWND, action: Action) {
+fn run_action(hwnd: Win, action: Action) {
     match action {
         Action::Select(id) => {
             with(|p| p.select(&id));
@@ -2151,23 +1900,23 @@ fn run_action(hwnd: HWND, action: Action) {
         }
         Action::Share => {
             let Some(Some(c)) = with(|p| p.selected_character().cloned()) else { return };
-            let Some(dest) = pick_save_file(hwnd, &c.id) else { return };
+            let Some(dest) = host::pick_save_file(hwnd, &c.id) else { return };
             match library::export_pack(&c, &dest) {
                 Ok(()) => {
                     with(|p| p.toast(crate::tf!("Đã lưu {}. Gửi file này cho người khác là được.", "Saved {}. Send this file to anyone.", dest.file_name().unwrap_or_default().to_string_lossy())));
                 }
-                Err(e) => show_error(hwnd, t("Chia sẻ nhân vật", "Share character"), &e),
+                Err(e) => host::show_error(hwnd, t("Chia sẻ nhân vật", "Share character"), &e),
             }
         }
         Action::Remove => {
             let Some((c, current)) = with(|p| (p.selected_character().cloned(), p.current.clone())) else { return };
             let Some(c) = c else { return };
             if let Some(why) = library::remove_blocker(&c, &current) {
-                show_error(hwnd, t("Xoá nhân vật", "Delete character"), &why);
+                host::show_error(hwnd, t("Xoá nhân vật", "Delete character"), &why);
                 return;
             }
             let dir = c.dir().map_or(String::new(), |d| d.display().to_string());
-            if !confirm(hwnd, t("Xoá nhân vật", "Delete character"), &crate::tf!("Xoá \"{}\"?\n\nThư mục {dir} sẽ bị xoá vĩnh viễn.", "Delete \"{}\"?\n\nThe folder {dir} will be permanently deleted.", c.name)) {
+            if !host::confirm(hwnd, t("Xoá nhân vật", "Delete character"), &crate::tf!("Xoá \"{}\"?\n\nThư mục {dir} sẽ bị xoá vĩnh viễn.", "Delete \"{}\"?\n\nThe folder {dir} will be permanently deleted.", c.name)) {
                 return;
             }
             match library::remove_dir(&c, &user_root()) {
@@ -2180,7 +1929,7 @@ fn run_action(hwnd: HWND, action: Action) {
                         p.toast(crate::tf!("Đã xoá {}", "Deleted {}", c.name));
                     });
                 }
-                Err(e) => show_error(hwnd, t("Xoá nhân vật", "Delete character"), &e),
+                Err(e) => host::show_error(hwnd, t("Xoá nhân vật", "Delete character"), &e),
             }
         }
         Action::Tab(i) => {
@@ -2255,11 +2004,11 @@ fn run_action(hwnd: HWND, action: Action) {
             });
         }
         Action::DlgPickFiles => {
-            let files = pick_files(hwnd, true);
+            let files = host::pick_files(hwnd, true);
             with(|p| p.add_files(&files));
         }
         Action::DlgPickSlot(i) => {
-            if let Some(f) = pick_files(hwnd, false).first() {
+            if let Some(f) = host::pick_files(hwnd, false).first() {
                 with(|p| p.set_slot_file(i, f));
             }
         }
@@ -2292,7 +2041,7 @@ fn run_action(hwnd: HWND, action: Action) {
         }
         Action::DlgScale => {}
         Action::DlgImport => {
-            let Some(dir) = pick_folder(hwnd) else { return };
+            let Some(dir) = host::pick_folder(hwnd) else { return };
             let Some(taken) = with(|p| p.characters.iter().map(|c| c.id.clone()).collect::<Vec<_>>()) else { return };
             match library::import_dir(&dir, &user_root(), &|id| taken.iter().any(|t| t == id)) {
                 Ok(id) => {
@@ -2303,7 +2052,7 @@ fn run_action(hwnd: HWND, action: Action) {
                         p.toast(t("Đã thêm nhân vật từ thư mục", "Added the character from the folder"));
                     });
                 }
-                Err(e) => show_error(hwnd, t("Thêm nhân vật", "Add character"), &crate::tf!("Không thêm được nhân vật.\n\n{e}", "Could not add the character.\n\n{e}")),
+                Err(e) => host::show_error(hwnd, t("Thêm nhân vật", "Add character"), &crate::tf!("Không thêm được nhân vật.\n\n{e}", "Could not add the character.\n\n{e}")),
             }
         }
         Action::DlgSave => {
@@ -2320,312 +2069,250 @@ fn run_action(hwnd: HWND, action: Action) {
     }
 }
 
-fn dropped_files(drop: HDROP) -> (Vec<PathBuf>, POINT) {
-    let mut out = Vec::new();
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe {
-        DragQueryPoint(drop, &mut pt);
-        let n = DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0);
-        for i in 0..n {
-            let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0) as usize;
-            let mut b = vec![0u16; len + 1];
-            DragQueryFileW(drop, i, b.as_mut_ptr(), b.len() as u32);
-            out.push(PathBuf::from(String::from_utf16_lossy(&b[..len])));
-        }
-        DragFinish(drop);
-    }
-    (out, pt)
+/// Whether the window is in use, rather than merely open.
+#[cfg(target_os = "macos")]
+pub(crate) fn window_is_key() -> bool {
+    host::is_key(window())
 }
 
-fn lparam_point(l: LPARAM, k: f32) -> (f32, f32) {
-    (((l & 0xffff) as i16 as f32) / k, (((l >> 16) & 0xffff) as i16 as f32) / k)
+#[cfg(windows)]
+pub(crate) fn surface<R>(f: impl FnOnce(&mut Surface) -> R) -> Option<R> {
+    with(|p| f(&mut p.surface))
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match msg {
-        WM_ERASEBKGND => 1,
-        WM_ACTIVATE => {
-            // While you use this window the buddy must not sit on top of its buttons.
-            window::sync_buddy_with_picker();
-            DefWindowProcW(hwnd, msg, wp, lp)
-        }
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            with(|p| {
-                p.paint_all();
-                BitBlt(hdc, 0, 0, p.canvas.w as i32, p.canvas.h as i32, p.canvas.dc, 0, 0, SRCCOPY);
-            });
-            EndPaint(hwnd, &ps);
-            0
-        }
-        WM_SIZE => {
-            let (w, h) = ((lp & 0xffff) as u32, ((lp >> 16) & 0xffff) as u32);
-            if w > 0 && h > 0 {
-                with(|p| {
-                    if let Some(c) = Canvas::new(w, h) {
-                        p.canvas = c;
-                    }
-                    p.invalidate();
-                });
+pub(crate) fn paint_into(f: impl FnOnce(&Canvas)) {
+    with(|p| {
+        p.paint_all();
+        f(&p.canvas);
+    });
+}
+
+pub(crate) fn with_canvas(f: impl FnOnce(&Canvas)) {
+    with(|p| f(&p.canvas));
+}
+
+pub(crate) fn resized(w: u32, h: u32) {
+    if w > 0 && h > 0 {
+        with(|p| {
+            if let Some(c) = Canvas::new(w, h) {
+                p.canvas = c;
             }
-            0
-        }
-        WM_GETMINMAXINFO => {
-            let k = GetDpiForWindow(hwnd) as f32 / 96.0;
-            let info = &mut *(lp as *mut MINMAXINFO);
-            info.ptMinTrackSize = POINT { x: (MIN_WINDOW_W * k) as i32, y: (760.0 * k) as i32 };
-            0
-        }
-        WM_DPICHANGED => {
-            let dpi = (wp & 0xffff) as f32;
-            let r = &*(lp as *const RECT);
-            with(|p| {
-                p.scale = dpi / 96.0;
-                p.text = Rc::new(TextDrawer::new_ui(p.scale));
-                p.load_preview();
-            });
-            SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-            0
-        }
-        WM_TIMER => {
-            if wp == TIMER_PREVIEW {
-                with(|p| {
-                    if IsIconic(hwnd) != 0 {
-                        return;
-                    }
-                    if let Some(gen) = p.generating.as_mut().filter(|g| g.running) {
-                        let now = (gen.done.load(Ordering::Relaxed), gen.started.elapsed().as_secs() / 60);
-                        if now != gen.shown {
-                            gen.shown = now;
-                            p.invalidate();
-                        }
-                    }
-                    if p.toast.as_ref().is_some_and(|(_, until)| now_ms() >= *until) {
-                        p.toast = None;
-                        p.invalidate();
-                    }
-                    // Behind a dialog or sitting still, the preview costs nothing.
-                    if p.dialog.is_none() && p.generating.is_none() && p.page == 0 && p.is_previewing_animated() {
-                        let (w, h) = (p.canvas.w, p.canvas.h);
-                        let buf = std::slice::from_raw_parts_mut(p.canvas.bits, (w * h * 4) as usize);
-                        let text = p.text.clone();
-                        let mut g = Gfx { buf, w, h, k: p.scale, text: &text, ox: 0.0, backdrop: p.backdrop, solid_cards: false };
-                        p.paint_stage(&mut g);
-                        let (x, y, sw, sh) = p.stage;
-                        let dc = GetDC(hwnd);
-                        BitBlt(dc, x, y, sw, sh, p.canvas.dc, x, y, SRCCOPY);
-                        ReleaseDC(hwnd, dc);
-                    }
-                });
-            }
-            0
-        }
-        WM_CTLCOLOREDIT => {
-            let hdc = wp as HDC;
-            SetTextColor(hdc, colorref(pal().ink));
-            SetBkColor(hdc, colorref(pal().surface));
-            with(|p| p.edit_brush as LRESULT).unwrap_or(0)
-        }
-        WM_SETTINGCHANGE => {
-            theme::reload();
-            with(|p| {
-                p.apply_look();
-                DeleteObject(p.edit_brush);
-                p.edit_brush = CreateSolidBrush(colorref(pal().surface));
-                p.invalidate();
-            });
-            0
-        }
-        WM_JOB_DONE => {
-            let results = std::mem::take(&mut *RESULTS.lock().unwrap());
-            for r in results {
-                with(|p| p.on_job(r));
-            }
-            0
-        }
-        WM_REFRESH => {
-            with(|p| p.refresh(None));
-            0
-        }
-        WM_MOUSEMOVE => {
-            with(|p| {
-                let (x, y) = lparam_point(lp, p.scale);
-                if !p.tracking {
-                    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
-                    TrackMouseEvent(&mut t);
-                    p.tracking = true;
-                }
-                if p.dragging_scale {
-                    p.set_scale_from(x);
-                    return;
-                }
-                let h = p.action_at(x, y);
-                if h != p.hover {
-                    p.hover = h;
-                    p.invalidate();
-                }
-            });
-            0
-        }
-        WM_MOUSELEAVE => {
-            with(|p| {
-                p.tracking = false;
-                if p.hover.take().is_some() {
-                    p.invalidate();
-                }
-            });
-            0
-        }
-        WM_LBUTTONDOWN => {
-            // Clicking away from a text box takes the focus back, so Esc and typing go to the right place.
-            SetFocus(hwnd);
-            let started_drag = with(|p| {
-                let (x, y) = lparam_point(lp, p.scale);
-                if p.action_at(x, y) == Some(Action::DlgScale) {
-                    p.dragging_scale = true;
-                    p.set_scale_from(x);
-                    return true;
-                }
-                false
-            })
-            .unwrap_or(false);
-            if started_drag {
-                SetCapture(hwnd);
-            }
-            0
-        }
-        WM_LBUTTONUP => {
-            let was_drag = with(|p| std::mem::take(&mut p.dragging_scale)).unwrap_or(false);
-            if was_drag {
-                ReleaseCapture();
-                return 0;
-            }
-            let action = with(|p| {
-                let (x, y) = lparam_point(lp, p.scale);
-                p.action_at(x, y)
-            })
-            .flatten();
-            if let Some(a) = action {
-                run_action(hwnd, a);
-            }
-            0
-        }
-        WM_MOUSEWHEEL => {
-            let delta = ((wp >> 16) & 0xffff) as i16 as f32;
-            with(|p| {
-                if p.dialog.is_none() && p.generating.is_none() && p.page == 0 {
-                    p.scroll -= delta / 120.0 * 60.0;
-                    p.clamp_scroll();
-                    p.invalidate();
-                }
-            });
-            0
-        }
-        WM_COMMAND => {
-            let code = ((wp >> 16) & 0xffff) as u32;
-            let id = wp & 0xffff;
-            if code == EN_CHANGE && id == ID_PROMPT {
-                with(|p| {
-                    if let Some(gen) = p.generating.as_mut().filter(|g| !g.error.is_empty()) {
-                        gen.error.clear();
-                        p.invalidate();
-                    }
-                });
-            }
-            if code == EN_CHANGE && id == ID_NAME {
-                with(|p| {
-                    if let Some(d) = p.dialog.as_mut() {
-                        d.error.clear();
-                        if d.show_json {
-                            p.invalidate();
-                        }
-                    }
-                });
-            }
-            0
-        }
-        WM_DROPFILES => {
-            let (files, pt) = dropped_files(wp as HDROP);
-            let (packs, files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| is_pack(f));
-            for pack in &packs {
-                import_pack(pack);
-            }
-            if files.is_empty() {
-                return 0;
-            }
-            if let Some(zip) = files.iter().find(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))) {
-                with(|p| {
-                    if !p.generating.as_ref().is_some_and(|g| g.running) {
-                        p.add_zip(zip);
-                    }
-                });
-                return 0;
-            }
-            if with(|p| p.generating.is_some()).unwrap_or(false) {
-                return 0;
-            }
-            with(|p| {
-                if p.dialog.is_none() {
-                    p.open_dialog(None, &files);
-                    return;
-                }
-                let (x, y) = (pt.x as f32 / p.scale, pt.y as f32 / p.scale);
-                // Dropped right onto a slot: that slot, whatever the file is called.
-                match p.action_at(x, y) {
-                    Some(Action::DlgPickSlot(i)) if !files.is_empty() => p.set_slot_file(i, &files[0]),
-                    _ => p.add_files(&files),
-                }
-            });
-            0
-        }
-        WM_KEYDOWN if wp == 0x1B => {
-            // Esc closes the dialog, then the window. Drawing is only ever stopped on purpose.
-            let had_dialog = with(|p| {
-                if p.generating.as_ref().is_some_and(|g| g.running) {
-                    return true;
-                }
-                let had = p.dialog.is_some() || p.generating.is_some();
-                p.dialog = None;
-                p.generating = None;
-                p.place_edits();
-                p.invalidate();
-                had
-            })
-            .unwrap_or(false);
-            if !had_dialog {
-                DestroyWindow(hwnd);
-            }
-            0
-        }
-        WM_CLOSE => {
-            let drawing = with(|p| p.generating.as_ref().is_some_and(|g| g.running)).unwrap_or(false);
-            if !drawing || confirm(hwnd, t("Tạo nhân vật bằng Codex", "Create a character with Codex"), t("Đóng cửa sổ sẽ huỷ nhân vật đang tạo. Đóng?", "Closing this window cancels the character being created. Close?")) {
-                DestroyWindow(hwnd);
-            }
-            0
-        }
-        WM_DESTROY => {
-            with(|p| {
-                if let Some(gen) = &p.generating {
-                    gen.cancel.store(true, Ordering::Relaxed);
-                }
-            });
-            HWND_OPEN.store(0, Ordering::Relaxed);
-            HWND_OPEN.store(0, Ordering::Release);
-            window::sync_buddy_with_picker();
-            window::trim_memory_soon();
-            let taken = PICKER.with(|p| p.try_borrow_mut().ok().and_then(|mut b| b.take()));
-            if let Some(p) = taken {
-                KillTimer(hwnd, TIMER_PREVIEW);
-                DeleteObject(p.edit_font);
-                DeleteObject(p.edit_brush);
-            }
-            RESULTS.lock().unwrap().clear();
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
+            p.invalidate();
+        });
     }
+}
+
+pub(crate) fn scale_changed(scale: f32) {
+    with(|p| {
+        p.scale = scale;
+        p.text = Rc::new(TextDrawer::new_ui(p.scale));
+        p.load_preview();
+    });
+}
+
+/// The window's regular beat. Returns the part of the canvas that was redrawn and needs to reach the screen.
+pub(crate) fn timer_tick(minimized: bool) -> Option<(i32, i32, i32, i32)> {
+    with(|p| {
+        if minimized {
+            return None;
+        }
+        if let Some(gen) = p.generating.as_mut().filter(|g| g.running) {
+            let now = (gen.done.load(Ordering::Relaxed), gen.started.elapsed().as_secs() / 60);
+            if now != gen.shown {
+                gen.shown = now;
+                p.invalidate();
+            }
+        }
+        if p.toast.as_ref().is_some_and(|(_, until)| now_ms() >= *until) {
+            p.toast = None;
+            p.invalidate();
+        }
+        // Behind a dialog or sitting still, the preview costs nothing.
+        if p.dialog.is_none() && p.generating.is_none() && p.page == 0 && p.is_previewing_animated() {
+            let (w, h) = (p.canvas.w, p.canvas.h);
+            let buf = unsafe { std::slice::from_raw_parts_mut(p.canvas.bits, (w * h * 4) as usize) };
+            let text = p.text.clone();
+            let mut g = Gfx { buf, w, h, k: p.scale, text: &text, ox: 0.0, backdrop: p.backdrop, solid_cards: false };
+            p.paint_stage(&mut g);
+            return Some(p.stage);
+        }
+        None
+    })
+    .flatten()
+}
+
+pub(crate) fn theme_changed() {
+    with(|p| {
+        p.apply_look();
+        p.invalidate();
+    });
+}
+
+pub(crate) fn jobs_done() {
+    let results = std::mem::take(&mut *RESULTS.lock().unwrap());
+    for r in results {
+        with(|p| p.on_job(r));
+    }
+}
+
+pub(crate) fn refresh_requested() {
+    with(|p| p.refresh(None));
+}
+
+/// Coordinates are logical. Returns whether the pointer needs to start being watched for leaving.
+pub(crate) fn mouse_moved(x: f32, y: f32) -> bool {
+    with(|p| {
+        let start_tracking = !std::mem::replace(&mut p.tracking, true);
+        if p.dragging_scale {
+            p.set_scale_from(x);
+            return start_tracking;
+        }
+        let h = p.action_at(x, y);
+        if h != p.hover {
+            p.hover = h;
+            p.invalidate();
+        }
+        start_tracking
+    })
+    .unwrap_or(false)
+}
+
+pub(crate) fn mouse_left() {
+    with(|p| {
+        p.tracking = false;
+        if p.hover.take().is_some() {
+            p.invalidate();
+        }
+    });
+}
+
+/// Returns whether this started dragging the scale slider.
+pub(crate) fn left_down(x: f32, y: f32) -> bool {
+    with(|p| {
+        if p.action_at(x, y) == Some(Action::DlgScale) {
+            p.dragging_scale = true;
+            p.set_scale_from(x);
+            return true;
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
+pub(crate) fn current_scale() -> f32 {
+    with(|p| p.scale).unwrap_or(1.0)
+}
+
+/// Returns whether this ended a drag of the slider.
+pub(crate) fn end_drag() -> bool {
+    with(|p| std::mem::take(&mut p.dragging_scale)).unwrap_or(false)
+}
+
+pub(crate) fn left_up(hwnd: Win, x: f32, y: f32) {
+    if let Some(a) = with(|p| p.action_at(x, y)).flatten() {
+        run_action(hwnd, a);
+    }
+}
+
+/// `notches`: one is one click of a wheel, away from you positive.
+pub(crate) fn wheel(notches: f32) {
+    with(|p| {
+        if p.dialog.is_none() && p.generating.is_none() && p.page == 0 {
+            p.scroll -= notches * 60.0;
+            p.clamp_scroll();
+            p.invalidate();
+        }
+    });
+}
+
+pub(crate) fn prompt_changed() {
+    with(|p| {
+        if let Some(gen) = p.generating.as_mut().filter(|g| !g.error.is_empty()) {
+            gen.error.clear();
+            p.invalidate();
+        }
+    });
+}
+
+pub(crate) fn name_changed() {
+    with(|p| {
+        if let Some(d) = p.dialog.as_mut() {
+            d.error.clear();
+            if d.show_json {
+                p.invalidate();
+            }
+        }
+    });
+}
+
+pub(crate) fn files_dropped(files: Vec<PathBuf>, x: f32, y: f32) {
+    let (packs, files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| is_pack(f));
+    for pack in &packs {
+        import_pack(pack);
+    }
+    if files.is_empty() {
+        return;
+    }
+    if let Some(zip) = files.iter().find(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))) {
+        with(|p| {
+            if !p.generating.as_ref().is_some_and(|g| g.running) {
+                p.add_zip(zip);
+            }
+        });
+        return;
+    }
+    if with(|p| p.generating.is_some()).unwrap_or(false) {
+        return;
+    }
+    with(|p| {
+        if p.dialog.is_none() {
+            p.open_dialog(None, &files);
+            return;
+        }
+        // Dropped right onto a slot: that slot, whatever the file is called.
+        match p.action_at(x, y) {
+            Some(Action::DlgPickSlot(i)) if !files.is_empty() => p.set_slot_file(i, &files[0]),
+            _ => p.add_files(&files),
+        }
+    });
+}
+
+/// Esc closes the dialog, then the window. Drawing is only ever stopped on purpose. Returns whether a
+/// dialog took it, so the window stays.
+pub(crate) fn escape() -> bool {
+    with(|p| {
+        if p.generating.as_ref().is_some_and(|g| g.running) {
+            return true;
+        }
+        let had = p.dialog.is_some() || p.generating.is_some();
+        p.dialog = None;
+        p.generating = None;
+        p.place_edits();
+        p.invalidate();
+        had
+    })
+    .unwrap_or(false)
+}
+
+/// Returns whether the window may close.
+pub(crate) fn may_close(hwnd: Win) -> bool {
+    let drawing = with(|p| p.generating.as_ref().is_some_and(|g| g.running)).unwrap_or(false);
+    !drawing || host::confirm(hwnd, t("Tạo nhân vật bằng Codex", "Create a character with Codex"), t("Đóng cửa sổ sẽ huỷ nhân vật đang tạo. Đóng?", "Closing this window cancels the character being created. Close?"))
+}
+
+/// Hands back what the platform has to clean up.
+pub(crate) fn closed() -> Option<Surface> {
+    with(|p| {
+        if let Some(gen) = &p.generating {
+            gen.cancel.store(true, Ordering::Relaxed);
+        }
+    });
+    HWND_OPEN.store(0, Ordering::Release);
+    window::sync_buddy_with_picker();
+    window::trim_memory_soon();
+    let taken = PICKER.with(|p| p.try_borrow_mut().ok().and_then(|mut b| b.take()));
+    RESULTS.lock().unwrap().clear();
+    taken.map(|p| p.surface)
 }
 
 #[cfg(test)]

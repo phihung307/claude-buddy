@@ -23,7 +23,13 @@ fn system_language() -> u16 {
     unsafe { GetUserDefaultUILanguage() }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn system_language() -> u16 {
+    let first = objc2_foundation::NSLocale::preferredLanguages().iter().next().map(|l| l.to_string());
+    if first.is_some_and(|l| l.starts_with("vi")) { LANG_VIETNAMESE } else { 0 }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn system_language() -> u16 {
     if std::env::var("LANG").is_ok_and(|l| l.starts_with("vi")) { LANG_VIETNAMESE } else { 0 }
 }

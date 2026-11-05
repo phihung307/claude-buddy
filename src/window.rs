@@ -15,7 +15,7 @@ use crate::picker;
 use crate::render::{self, Bubble, Hit, HitRect, TextDrawer, View, CHAR_SIZE, WIN_H, WIN_W};
 use crate::server::{self, now_ms, Shared};
 use crate::sound;
-use crate::store::{self, name_of, status_of, detail_of, Session, State};
+use crate::store::{self, name_of, status_of, Session, State};
 use crate::usage;
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -224,7 +224,7 @@ struct Loaded {
 
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
 
-pub use crate::config::user_root;
+pub use crate::config::{user_root, Setting, SettingsView};
 
 struct Drag {
     start_cursor: POINT,
@@ -728,7 +728,7 @@ impl App {
                 }
             }
             if self.config.toasts {
-                let (title, body) = toast_text(&t.session, t.to);
+                let (title, body) = crate::store::toast_text(&t.session, t.to);
                 let icon = make_icon(t.to, BALLOON_ICON_SIZE);
                 self.balloon_with_icon(&title, &body, icon);
             }
@@ -1280,21 +1280,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 }
 
 /// Says what happened and where, in words, for a Windows notification.
-fn toast_text(s: &Session, to: State) -> (String, String) {
-    let title = match to {
-        State::Waiting => t("Claude cần bạn", "Claude needs you"),
-        State::Done => t("Claude đã xong", "Claude is done"),
-        State::Error => t("Claude gặp lỗi", "Claude hit an error"),
-        _ => "Claude Buddy",
-    };
-    let name = name_of(s);
-    let body = match detail_of(s) {
-        Some(d) if !d.is_empty() => format!("{name}\n{d}"),
-        _ => name,
-    };
-    (title.to_string(), body)
-}
-
 /// The logo at tray size, with a dot saying what the sessions are doing. Lets you check on Claude with
 /// a glance at the taskbar, with nothing covering your work.
 fn make_tray_icon(state: State) -> HICON {
@@ -1511,33 +1496,6 @@ pub fn run() {
 
 // ---- what the picker needs from the app ----
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Setting {
-    Hooks,
-    Sound,
-    Toasts,
-    Autostart,
-    AutoHide,
-    Translucent,
-    Size(u8),
-    /// 0 follows Windows, 1 Vietnamese, 2 English.
-    Language(u8),
-    ResetPosition,
-    Folder,
-}
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct SettingsView {
-    pub hooks: bool,
-    pub sound: bool,
-    pub toasts: bool,
-    pub autostart: bool,
-    pub auto_hide: bool,
-    pub translucent: bool,
-    pub size: u8,
-    pub language: u8,
-}
-
 /// Keeps the buddy under the main window while you use it, and on top of everything otherwise.
 pub fn sync_buddy_with_picker() {
     with_app(|a| a.sync_z_order());
@@ -1641,7 +1599,7 @@ mod tests {
         let mut st = Store::default();
         let e = Event { session_id: "a".into(), event: "Notification".into(), cwd: Some("C:\\work\\shop-api".into()), message: Some("Cần quyền chạy lệnh".into()), ..Default::default() };
         st.apply(&e, 0).unwrap();
-        let (title, body) = toast_text(st.get("a").unwrap(), State::Waiting);
+        let (title, body) = crate::store::toast_text(st.get("a").unwrap(), State::Waiting);
         assert_eq!(title, "Claude cần bạn");
         assert_eq!(body, "shop-api\nCần quyền chạy lệnh");
         assert!(!title.chars().any(|c| c as u32 > 0x2000), "no emoji in titles");

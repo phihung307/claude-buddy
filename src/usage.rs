@@ -415,7 +415,7 @@ pub fn request_scan(shared: Arc<Shared>) {
         }
         worker.scanned.store(true, Ordering::Release);
         worker.scanning.store(false, Ordering::Release);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             crate::window::wake(worker.hwnd.load(Ordering::Relaxed));
             crate::picker::notify_changed();

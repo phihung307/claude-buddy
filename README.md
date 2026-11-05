@@ -3,7 +3,7 @@
 **English** | [Tiếng Việt](README.vi.md)
 
 A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
-you, done, or failed. Windows 10/11 only.
+you, done, or failed. For Windows 10/11, with macOS in beta.
 
 ## Features
 
@@ -33,6 +33,16 @@ Run the same command again to update. To skip the hooks, set `$env:CLAUDE_BUDDY_
 asks when it starts.
 
 The app isn't code-signed, so Windows SmartScreen or antivirus software may warn about it.
+
+### macOS (beta)
+
+macOS 11 or later, Apple silicon or Intel. Not signed by Apple yet, and still being tested.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.0 sh
+```
+
+To remove it, run `curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh`.
 
 ## Uninstall
 

@@ -237,7 +237,7 @@ impl Shared {
         if let Some(t) = t {
             self.pending.lock().unwrap().push(t);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         crate::window::wake(self.hwnd.load(Ordering::Relaxed));
         Ok(())
     }

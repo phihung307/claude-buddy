@@ -30,7 +30,29 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CODEX_EXE: &str = if cfg!(windows) { "codex.exe" } else { "codex" };
 const CANCELLED: &str = "cancelled";
 
+/// A Mac app started from the Finder doesn't get the terminal's PATH, so the usual places are looked at
+/// too, and last of all the user's own shell is asked.
+#[cfg(not(windows))]
+pub fn find() -> Option<PathBuf> {
+    let home = crate::config::home();
+    let fixed = [
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+        home.join(".local/bin/codex"),
+        home.join(".npm-global/bin/codex"),
+        PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
+    ];
+    let on_path = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(CODEX_EXE)).find(|p| p.is_file()));
+    on_path.or_else(|| fixed.into_iter().find(|p| p.is_file())).or_else(|| {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+        let out = Command::new(shell).args(["-lc", "command -v codex"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        path.is_file().then_some(path)
+    })
+}
+
 /// Codex from PATH, or the one the Codex app keeps for itself, newest first.
+#[cfg(windows)]
 pub fn find() -> Option<PathBuf> {
     let on_path = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(CODEX_EXE)).find(|p| p.is_file()));
     on_path.or_else(|| {
@@ -81,6 +103,18 @@ fn name_from(reply: &str, description: &str) -> String {
     let words: Vec<&str> = description.split_whitespace().take(3).collect();
     let short = words.join(" ");
     if short.chars().any(char::is_alphanumeric) { short.chars().take(40).collect() } else { "Codex".into() }
+}
+
+#[cfg(not(windows))]
+static RUNNING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// For when the app quits: nothing else ends Codex here, and it would keep spending the user's quota.
+#[cfg(not(windows))]
+pub fn stop_running() {
+    let pid = RUNNING.swap(0, Ordering::AcqRel);
+    if pid != 0 {
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
 }
 
 /// So that Codex can't keep running, and keep spending the user's quota, after the app is gone.
@@ -142,6 +176,8 @@ fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBoo
         .map_err(|e| crate::tf!("Không chạy được Codex: {e}", "Could not run Codex: {e}"))?;
     #[cfg(windows)]
     let job = die_with_this_app(&child);
+    #[cfg(not(windows))]
+    RUNNING.store(child.id(), Ordering::Release);
     // Through stdin, never the command line: this is free text from the user.
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(prompt.as_bytes());
@@ -179,6 +215,8 @@ fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBoo
         }
     };
     let _ = child.wait();
+    #[cfg(not(windows))]
+    RUNNING.store(0, Ordering::Release);
     let _ = reader.join();
     #[cfg(windows)]
     if let Some(job) = job {

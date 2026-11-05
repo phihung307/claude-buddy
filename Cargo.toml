@@ -1,6 +1,6 @@
 [package]
 name = "claude-buddy-rs"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Lightweight native desktop companion that shows Claude Code session status"
 license = "MIT"
@@ -35,6 +35,10 @@ objc2-app-kit = "0.3"
 objc2-core-foundation = "0.3"
 objc2-core-graphics = "0.3"
 objc2-quartz-core = "0.3"
+# MP4, through the system's own decoders.
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # Only for MP4 through Media Foundation, whose COM interfaces windows-sys doesn't wrap.

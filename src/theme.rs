@@ -27,6 +27,7 @@ static SYSTEM_TRANSPARENCY: AtomicBool = AtomicBool::new(true);
 
 /// What sits behind a window's page background.
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Backdrop {
     Solid,
     /// Windows 11: the page is left empty and Windows fills it with Mica.
@@ -50,6 +51,7 @@ pub const CARD_ALPHA: f32 = 0.72;
 pub const FLOATING_ALPHA: f32 = 0.94;
 pub const BLUR_TINT_ALPHA: f32 = 0.72;
 
+#[cfg(windows)]
 #[repr(C)]
 struct AccentPolicy {
     state: i32,
@@ -58,6 +60,7 @@ struct AccentPolicy {
     animation: i32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 struct CompositionData {
     attribute: i32,
@@ -156,6 +159,7 @@ pub fn pal() -> Pal {
 }
 
 /// The registry stores it as 0xAABBGGRR.
+#[cfg(any(windows, test))]
 fn accent_from_registry(abgr: u32) -> u32 {
     (abgr & 0xff) << 16 | (abgr & 0xff00) | (abgr >> 16 & 0xff)
 }
@@ -208,6 +212,23 @@ pub fn apply_backdrop(hwnd: HWND) -> Backdrop {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, &caption as *const u32 as *const _, 4);
         got
     }
+}
+
+/// Light or dark from the system; pages are solid here.
+#[cfg(not(windows))]
+pub fn reload() {
+    #[cfg(target_os = "macos")]
+    let system_dark = objc2_foundation::NSUserDefaults::standardUserDefaults().stringForKey(&objc2_foundation::NSString::from_str("AppleInterfaceStyle")).is_some_and(|s| s.to_string() == "Dark");
+    #[cfg(not(target_os = "macos"))]
+    let system_dark = false;
+    let forced = std::env::var("CLAUDE_BUDDY_RS_THEME").ok();
+    DARK.store(forced.as_deref().map_or(system_dark, |t| t == "dark"), Ordering::Relaxed);
+    SYSTEM_TRANSPARENCY.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(windows))]
+pub fn apply_backdrop<T>(_window: T) -> Backdrop {
+    Backdrop::Solid
 }
 
 #[cfg(test)]

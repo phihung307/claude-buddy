@@ -37,6 +37,34 @@ impl Default for Config {
     }
 }
 
+/// What the settings page can change.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Setting {
+    Hooks,
+    Sound,
+    Toasts,
+    Autostart,
+    AutoHide,
+    Translucent,
+    Size(u8),
+    /// 0 follows the system, 1 Vietnamese, 2 English.
+    Language(u8),
+    ResetPosition,
+    Folder,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct SettingsView {
+    pub hooks: bool,
+    pub sound: bool,
+    pub toasts: bool,
+    pub autostart: bool,
+    pub auto_hide: bool,
+    pub translucent: bool,
+    pub size: u8,
+    pub language: u8,
+}
+
 pub fn dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CLAUDE_BUDDY_RS_HOME") {
         return PathBuf::from(d);

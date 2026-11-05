@@ -37,16 +37,21 @@ fn parse_ps(text: &str) -> std::collections::HashMap<u32, (u32, &str)> {
         .collect()
 }
 
+/// Every process: its parent and its command's name.
+#[cfg(not(windows))]
+pub fn process_table() -> std::collections::HashMap<u32, (u32, String)> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output() else { return Default::default() };
+    parse_ps(&String::from_utf8_lossy(&out.stdout)).into_iter().map(|(pid, (parent, name))| (pid, (parent, name.to_string()))).collect()
+}
+
 #[cfg(not(windows))]
 fn claude_pid() -> Option<u32> {
-    let out = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let procs = parse_ps(&text);
+    let procs = process_table();
     let direct_parent = std::os::unix::process::parent_id();
     let mut p = direct_parent;
     for _ in 0..8 {
         let (parent, name) = procs.get(&p)?;
-        if matches!(*name, "claude" | "node" | "bun") {
+        if matches!(name.as_str(), "claude" | "node" | "bun") {
             return Some(p);
         }
         p = *parent;

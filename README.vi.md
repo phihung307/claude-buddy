@@ -3,7 +3,7 @@
 [English](README.md) | **Tiếng Việt**
 
 Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chỉ
-chạy trên Windows 10/11.
+chạy trên Windows 10/11, còn macOS đang ở bản beta.
 
 ## Tính năng
 
@@ -33,6 +33,16 @@ Chạy lại lệnh này để cập nhật. Không muốn tự thêm hook thì 
 app sẽ hỏi lúc khởi động.
 
 App chưa được ký số, nên Windows SmartScreen hoặc phần mềm diệt virus có thể cảnh báo.
+
+### macOS (beta)
+
+macOS 11 trở lên, chip Apple hoặc Intel. Chưa được Apple ký, và vẫn đang thử nghiệm.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.0 sh
+```
+
+Muốn gỡ thì chạy `curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh`.
 
 ## Gỡ
 

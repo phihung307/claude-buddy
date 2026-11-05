@@ -473,6 +473,21 @@ pub fn sessions_json(sessions: &[Session]) -> Value {
     )
 }
 
+pub fn toast_text(s: &Session, to: State) -> (String, String) {
+    let title = match to {
+        State::Waiting => t("Claude cần bạn", "Claude needs you"),
+        State::Done => t("Claude đã xong", "Claude is done"),
+        State::Error => t("Claude gặp lỗi", "Claude hit an error"),
+        _ => "Claude Buddy",
+    };
+    let name = name_of(s);
+    let body = match detail_of(s) {
+        Some(d) if !d.is_empty() => format!("{name}\n{d}"),
+        _ => name,
+    };
+    (title.to_string(), body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

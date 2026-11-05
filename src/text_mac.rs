@@ -5,7 +5,7 @@ use crate::render::{blend_mask, Font};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
-    NSColor, NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName, NSGraphicsContext, NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
+    NSColor, NSFont, NSFontAttributeName, NSFontWeightRegular, NSFontWeightSemibold, NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
     NSStringDrawingOptions, NSAttributedStringNSExtendedStringDrawing, NSAttributedStringNSStringDrawing,
 };
 use objc2_core_foundation::CGFloat;
@@ -16,37 +16,35 @@ pub struct TextDrawer {
     fonts: [Retained<NSFont>; 7],
 }
 
-/// The Windows icon font's code points, as symbols every Mac has.
-fn icon_text(s: &str) -> String {
-    s.chars()
-        .map(|c| match c as u32 {
-            0xE77B => "☺",
-            0xE9D2 => "▤",
-            0xE710 => "+",
-            0xE945 => "✦",
-            0xE70F => "✎",
-            0xE838 => "⌂",
-            0xE74D => "✕",
-            0xE72D => "↗",
-            0xE711 => "✕",
-            0xE73E => "✓",
-            0xE713 => "⚙",
-            0xE703 => "⚡",
-            0xE767 => "♪",
-            0xEA8F => "◉",
-            0xF2B7 => "A",
-            0xE7E8 => "⏻",
-            0xE771 => "◐",
-            0xED1A => "◌",
-            0xE740 => "⤢",
-            0xE707 => "✥",
-            0xE916 => "◔",
-            0xE7BA => "!",
-            0xEA39 => "✕",
-            0xE73F => "…",
-            _ => "",
-        })
-        .collect::<String>()
+/// The Windows icon font's code points, as the system's symbols on a Mac.
+fn symbol_name(s: &str) -> Option<&'static str> {
+    Some(match s.chars().next()? as u32 {
+        0xE77B => "person",
+        0xE9D2 => "chart.xyaxis.line",
+        0xE710 => "plus",
+        0xE945 => "bolt",
+        0xE70F => "pencil",
+        0xE838 => "folder",
+        0xE74D => "trash",
+        0xE72D => "square.and.arrow.up",
+        0xE711 => "xmark",
+        0xE73E => "checkmark",
+        0xE713 => "gearshape",
+        0xE703 => "powerplug",
+        0xE767 => "speaker.wave.2",
+        0xEA8F => "bell",
+        0xF2B7 => "globe",
+        0xE7E8 => "power",
+        0xE771 => "circle.lefthalf.filled",
+        0xED1A => "eye.slash",
+        0xE740 => "arrow.up.left.and.arrow.down.right",
+        0xE707 => "arrow.up.and.down.and.arrow.left.and.right",
+        0xE916 => "clock",
+        0xE7BA => "exclamationmark",
+        0xEA39 => "xmark",
+        0xE73F => "ellipsis",
+        _ => return None,
+    })
 }
 
 impl TextDrawer {
@@ -88,7 +86,7 @@ impl TextDrawer {
     }
 
     fn attributed(&self, s: &str, f: Font) -> Retained<NSAttributedString> {
-        let shown = if matches!(f, Font::Icon) { icon_text(s) } else { s.replace(['\r', '\n'], " ") };
+        let shown = s.replace(['\r', '\n'], " ");
         let style = NSMutableParagraphStyle::new();
         style.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
         let white = NSColor::whiteColor();
@@ -109,9 +107,18 @@ impl TextDrawer {
         if bw <= 0 || bh <= 0 || s.is_empty() {
             return;
         }
+        let symbol = if matches!(f, Font::Icon) { symbol_name(s).and_then(|n| NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(n), None)) } else { None };
+        if matches!(f, Font::Icon) && symbol.is_none() {
+            return;
+        }
         let text = self.attributed(s, f);
         let mut mask = vec![0u8; (bw * bh * 4) as usize];
-        mask.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        // Symbols draw black, so theirs goes on white and is read the other way round.
+        let (paper, dark_mask) = if symbol.is_some() { (255, true) } else { (0, false) };
+        mask.chunks_exact_mut(4).for_each(|p| {
+            p[..3].fill(paper);
+            p[3] = 255;
+        });
         let Some(space) = CGColorSpace::new_device_rgb() else { return };
         let info = CGBitmapInfo(CGImageByteOrderInfo::Order32Little.0 | CGImageAlphaInfo::PremultipliedFirst.0);
         let context = unsafe { CGBitmapContextCreate(mask.as_mut_ptr() as *mut _, bw as usize, bh as usize, 8, bw as usize * 4, Some(&space), info.0) };
@@ -119,14 +126,24 @@ impl TextDrawer {
         let graphics = NSGraphicsContext::graphicsContextWithCGContext_flipped(&context, false);
         NSGraphicsContext::saveGraphicsState_class();
         NSGraphicsContext::setCurrentContext(Some(&graphics));
-        let height = text.size().height;
-        let rect = NSRect::new(NSPoint::new(0.0, ((bh as CGFloat - height) / 2.0).floor()), NSSize::new(bw as CGFloat, height));
-        let options = NSStringDrawingOptions::UsesLineFragmentOrigin | NSStringDrawingOptions::TruncatesLastVisibleLine;
-        text.drawWithRect_options_context(rect, options, None);
+        if let Some(image) = &symbol {
+            let side = self.fonts[Self::index(f)].pointSize().min(bw as CGFloat).min(bh as CGFloat);
+            let natural = image.size();
+            let k = side / natural.width.max(natural.height).max(1.0);
+            let size = NSSize::new(natural.width * k, natural.height * k);
+            // Left aligned and centred in height, the way a glyph of the icon font lands.
+            let at = NSPoint::new(0.0, ((bh as CGFloat - size.height) / 2.0).floor());
+            image.drawInRect(NSRect::new(at, size));
+        } else {
+            let height = text.size().height;
+            let rect = NSRect::new(NSPoint::new(0.0, ((bh as CGFloat - height) / 2.0).floor()), NSSize::new(bw as CGFloat, height));
+            let options = NSStringDrawingOptions::UsesLineFragmentOrigin | NSStringDrawingOptions::TruncatesLastVisibleLine;
+            text.drawWithRect_options_context(rect, options, None);
+        }
         graphics.flushGraphics();
         NSGraphicsContext::restoreGraphicsState_class();
         drop(graphics);
         drop(context);
-        blend_mask(buf, w, h, x, y, bw, bh, &mask, color, false);
+        blend_mask(buf, w, h, x, y, bw, bh, &mask, color, dark_mask);
     }
 }

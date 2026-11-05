@@ -22,7 +22,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSFloatingWindowLevel,
-    NSImage, NSMenu, NSMenuItem, NSPanel, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView, NSWindowCollectionBehavior, NSWindowOcclusionState,
+    NSImage, NSMenu, NSMenuItem, NSPanel, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode,
     NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGFloat};
@@ -942,6 +942,10 @@ pub fn sync_buddy_with_picker() {
     with_app(|a| {
         let in_use = picker::window_is_key();
         a.window.setLevel(if in_use { 0 } else { NSFloatingWindowLevel });
+        // Changing level can bring it to the front of that level, which would be in front of the window.
+        if let Some(n) = host::window_number(picker::window()).filter(|_| in_use && a.visible) {
+            a.window.orderWindow_relativeTo(NSWindowOrderingMode::Below, n);
+        }
     });
 }
 

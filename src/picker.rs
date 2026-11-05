@@ -551,10 +551,10 @@ impl Picker {
         let first = if self.usage_ready {
             t("Số lớn = đầu vào + đầu ra + ghi cache. Đọc cache tính riêng vì mỗi lượt đọc lại cùng ngữ cảnh.", "The big number is input + output + cache writes. Cache reads are separate: each turn re-reads the same context.")
         } else {
-            t("Đang đếm từ toàn bộ transcript trên máy này, thường mất vài giây…", "Counting every transcript on this PC, usually takes a few seconds…")
+            t("Đang đếm từ toàn bộ transcript trên máy này, thường mất vài giây…", "Counting every transcript on this computer, usually takes a few seconds…")
         };
         g.label(18.0, note_y, lw - 36.0, 18.0, first, Font::Small, p.muted);
-        g.label(18.0, note_y + 18.0, lw - 36.0, 18.0, t("Lấy từ transcript trên máy này, cả subagent; không gồm Claude dùng ở máy khác hay trên web.", "From transcripts on this PC, subagents included; Claude used on other machines or the web isn't counted."), Font::Small, p.muted);
+        g.label(18.0, note_y + 18.0, lw - 36.0, 18.0, t("Lấy từ transcript trên máy này, cả subagent; không gồm Claude dùng ở máy khác hay trên web.", "From transcripts on this computer, subagents included; Claude used on other machines or the web isn't counted."), Font::Small, p.muted);
     }
 
     /// A single series, so the title names it and no legend is needed. Exact numbers come on hover,
@@ -634,16 +634,17 @@ impl Picker {
             (ICON_PLUG, t("Kết nối Claude Code", "Connect to Claude Code"), if s.hooks { t("Đang nhận trạng thái từ các phiên mới", "Receiving status from new sessions") } else { t("Chưa kết nối: buddy không biết Claude đang làm gì", "Not connected: Buddy can't tell what Claude is doing") }, s.hooks, Setting::Hooks),
             (ICON_HIDE, t("Tự ẩn khi toàn màn hình", "Hide during full screen"), t("Ẩn khi trình chiếu, xem phim hay chơi game, rồi tự hiện lại", "Hides for presentations, movies and games, then comes back"), s.auto_hide, Setting::AutoHide),
             (ICON_SOUND, t("Âm báo", "Sounds"), t("Khi Claude xong việc, cần bạn hoặc gặp lỗi", "When Claude finishes, needs you or hits an error"), s.sound, Setting::Sound),
-            (ICON_BELL, t("Thông báo Windows", "Windows notifications"), t("Không hiện khi trình chiếu hoặc bật Focus Assist", "Not shown during presentations or Focus Assist"), s.toasts, Setting::Toasts),
-            (ICON_POWER, t("Khởi động cùng Windows", "Start with Windows"), t("Mở Claude Buddy khi đăng nhập", "Open Claude Buddy when you sign in"), s.autostart, Setting::Autostart),
+            (ICON_BELL, if cfg!(windows) { t("Thông báo Windows", "Windows notifications") } else { t("Thông báo", "Notifications") }, if cfg!(windows) { t("Không hiện khi trình chiếu hoặc bật Focus Assist", "Not shown during presentations or Focus Assist") } else { t("Hiện ở góc màn hình khi Claude xong việc hoặc cần bạn", "Shown in the corner of the screen when Claude finishes or needs you") }, s.toasts, Setting::Toasts),
+            (ICON_POWER, if cfg!(windows) { t("Khởi động cùng Windows", "Start with Windows") } else { t("Mở khi đăng nhập", "Open at login") }, t("Mở Claude Buddy khi đăng nhập", "Open Claude Buddy when you sign in"), s.autostart, Setting::Autostart),
             (ICON_TRANSLUCENT, t("Hiệu ứng trong mờ", "Transparency effects"), t("Nền cửa sổ trong mờ theo Windows; tự tắt khi Windows tắt Transparency effects", "See-through window backgrounds; turns off when Windows turns off transparency effects"), s.translucent, Setting::Translucent),
         ];
-        for (icon, title, desc, on, setting) in toggles {
+        // Pages are solid on a Mac, so there is nothing for this one to change.
+        for (icon, title, desc, on, setting) in toggles.into_iter().filter(|x| cfg!(windows) || x.4 != Setting::Translucent) {
             let ry = row(g, icon, title, desc, &mut y);
             g.toggle(x + w - 62.0, ry + 20.0, on, Action::Set(setting), &hover, hits);
         }
         let ry = row(g, ICON_LANGUAGE, t("Ngôn ngữ", "Language"), t("Áp dụng ngay cho toàn bộ app", "Applies to the whole app right away"), &mut y);
-        let labels = [t("Theo Windows", "Windows default"), "Tiếng Việt", "English"];
+        let labels = [if cfg!(windows) { t("Theo Windows", "Windows default") } else { t("Theo hệ thống", "System default") }, "Tiếng Việt", "English"];
         let mut cx = x + w - 16.0 - labels.iter().map(|l| g.chip_w(l) + 4.0).sum::<f32>();
         for (i, l) in labels.iter().enumerate() {
             cx = g.chip(cx, ry + 16.0, l, s.language == i as u8, Action::Set(Setting::Language(i as u8)), &hover, hits) + 4.0;
@@ -939,7 +940,7 @@ impl Picker {
         } else if !info.is_empty() {
             (info, pal().accent)
         } else if !has_codex {
-            (t("Không tìm thấy Codex trên máy này. Bạn vẫn có thể tạo bằng ChatGPT.", "Codex wasn't found on this PC. You can still create it with ChatGPT.").to_string(), pal().muted)
+            (t("Không tìm thấy Codex trên máy này. Bạn vẫn có thể tạo bằng ChatGPT.", "Codex wasn't found on this computer. You can still create it with ChatGPT.").to_string(), pal().muted)
         } else {
             (t("Mất khoảng 6 đến 10 phút và dùng hạn mức Codex của bạn.", "Takes about 6 to 10 minutes and uses your Codex quota.").to_string(), pal().muted)
         };

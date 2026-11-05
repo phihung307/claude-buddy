@@ -156,7 +156,7 @@ struct Run {
 
 /// Runs Codex in `dir` until it stops or is told to. `args` come after `exec`.
 fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBool, done: &AtomicUsize) -> Result<Run, String> {
-    let exe = find().ok_or(t("Không tìm thấy Codex trên máy này.", "Codex wasn't found on this PC."))?;
+    let exe = find().ok_or(t("Không tìm thấy Codex trên máy này.", "Codex wasn't found on this computer."))?;
     let reply_file = dir.join("reply.txt");
     let mut command = Command::new(exe);
     #[cfg(windows)]

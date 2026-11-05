@@ -39,7 +39,7 @@ App chưa được ký số, nên Windows SmartScreen hoặc phần mềm diệt
 macOS 11 trở lên, chip Apple hoặc Intel. Chưa được Apple ký, và vẫn đang thử nghiệm.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.0 sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.1 sh
 ```
 
 Muốn gỡ thì chạy `curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh`.

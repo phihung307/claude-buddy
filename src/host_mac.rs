@@ -427,9 +427,19 @@ pub fn bring_forward(hwnd: Win) {
                 window.deminiaturize(None);
                 window.makeKeyAndOrderFront(None);
             }
-            NSApplication::sharedApplication(view.mtm()).activate();
+            come_forward(view.mtm());
         }
     });
+}
+
+pub fn window_number(hwnd: Win) -> Option<isize> {
+    OPEN_VIEW.with(|v| v.borrow().as_ref().filter(|view| view.handle() == hwnd).and_then(|view| view.window()).map(|w| w.windowNumber()))
+}
+
+/// A menu bar app is never in front on its own, so opening a window has to ask for it outright.
+#[allow(deprecated)]
+fn come_forward(mtm: MainThreadMarker) {
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
 }
 
 pub fn is_key(hwnd: Win) -> bool {
@@ -484,7 +494,7 @@ pub fn show_window(hwnd: Win, _size: (u32, u32), frame_ms: u32) {
             window.makeKeyAndOrderFront(None);
             window.makeFirstResponder(Some(&**view));
         }
-        NSApplication::sharedApplication(view.mtm()).activate();
+        come_forward(view.mtm());
         let target: &AnyObject = view;
         let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(frame_ms as f64 / 1000.0, target, sel!(pickerTick:), None, true) };
         TIMER.with(|t| *t.borrow_mut() = Some(timer));
@@ -522,7 +532,7 @@ fn alert(title: &str, message: &str, buttons: &[&str]) -> bool {
     for b in buttons {
         a.addButtonWithTitle(&NSString::from_str(b));
     }
-    NSApplication::sharedApplication(mtm).activate();
+    come_forward(mtm);
     a.runModal() == NSAlertFirstButtonReturn
 }
 

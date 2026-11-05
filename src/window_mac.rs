@@ -794,6 +794,7 @@ impl App {
 
     fn housekeeping(&mut self) {
         let now = now_ms();
+        self.shared.store.lock().unwrap().persist();
         if crate::update::ready() && picker::window().is_null() && crate::update::apply() {
             quit();
         }
@@ -818,7 +819,7 @@ impl App {
                     pending.push(x);
                 }
             }
-            let ticked = st.tick(now);
+            let ticked = st.tick(now) | st.forget_closed(process_alive);
             !dead.is_empty() || ticked
         };
         if self.note_until != 0 && now >= self.note_until {
@@ -1091,6 +1092,7 @@ pub fn run() {
     theme::set_translucent(config.translucent);
     crate::update::start(config.auto_update);
     let shared = Arc::new(Shared::default());
+    shared.store.lock().unwrap().restore(now_ms(), process_alive);
     if let Err(e) = server::start(shared.clone(), config.port) {
         eprintln!("{}", crate::tf!("Không mở được cổng {}: {e}", "Could not open port {}: {e}", config.port));
         std::process::exit(1);

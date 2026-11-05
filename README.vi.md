@@ -9,7 +9,7 @@ trên Windows 10/11 và macOS 11 trở lên.
 
 - **Xem nhanh các phiên:** nhân vật cho biết Claude đang chạy, cần bạn, đã xong hay gặp lỗi. Bấm vào để tới đúng cửa sổ của
   phiên đó.
-- **Tạo nhân vật từ mô tả:** Codex vẽ đủ 5 trạng thái dạng ảnh động, có cả xoay người và đấm đá. Không có Codex thì dùng
+- **Tạo nhân vật từ mô tả:** Codex vẽ đủ 5 trạng thái dạng ảnh động, có cả xoay người và ăn mừng khi xong việc. Không có Codex thì dùng
   ChatGPT rồi kéo file zip vào app.
 - **Sửa bằng prompt:** chỉ cần gõ "đội thêm mũ đỏ" là nhân vật được vẽ lại, và Codex nhớ những gì đã vẽ.
 - **Chia sẻ nhân vật:** gói trong một file `.buddy`, bấm đúp là thêm được.
@@ -84,8 +84,8 @@ Lệnh này xoá app, mục mở khi đăng nhập và hook. Cài đặt, số l
 | Bấm bong bóng | Mở cửa sổ của phiên cần chú ý nhất |
 | Bấm một dòng phiên | Mở cửa sổ terminal/IDE của phiên đó |
 | Kéo nhân vật | Tới bất kỳ đâu trên màn hình; vị trí được ghi nhớ |
-| Lăn chuột trên nhân vật (Windows) | Phóng to hoặc thu nhỏ, tối đa bằng màn hình |
-| Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R (Windows) | Skill: dịch chuyển sang góc khác / phân thân ở các góc / toàn màn hình và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
+| Lăn chuột trên nhân vật (Windows) | Phóng to hoặc thu nhỏ, tối đa 60% màn hình |
+| Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R (Windows) | Skill: dịch chuyển sang góc khác / phân thân ở các góc / cỡ lớn nhất và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
 | Chuột phải nhân vật hoặc icon khay | Menu nhanh |
 | Bấm icon khay (Windows) | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
 | Bấm icon thanh menu (macOS) | Menu nhanh, mở cửa sổ chính bằng **Quản lý nhân vật**, **Xem mức dùng** và **Cài đặt** |
@@ -153,7 +153,7 @@ thái):
 
 Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
-Trên Windows, ảnh lớn hơn cỡ thường (ví dụ 1024 pixel) vẫn nét khi phóng to nhân vật hoặc toàn màn hình.
+Trên Windows, ảnh lớn hơn cỡ thường (ví dụ 1024 pixel) vẫn nét khi phóng to nhân vật.
 
 Trên Windows, thêm `"autoSkills": true` vào `character.json` thì nhân vật tự dùng skill:
 
@@ -163,7 +163,7 @@ Trên Windows, thêm `"autoSkills": true` vào `character.json` thì nhân vật
 | Một phiên cần bạn | Dịch chuyển tới góc gần con trỏ chuột nhất |
 | Các phiên xong việc | Dịch chuyển sang góc khác |
 
-Không tự dùng khi đang toàn màn hình, khi khoá màn hình, hoặc khi bạn đang kéo nhân vật. Bật hoặc tắt cho nhân vật bất kỳ
+Không tự dùng khi Ctrl+R đang để ở cỡ lớn nhất, khi khoá màn hình, hoặc khi bạn đang kéo nhân vật. Bật hoặc tắt cho nhân vật bất kỳ
 trong menu chuột phải (**Tự dùng skill theo phiên**).
 
 ## Cấu hình

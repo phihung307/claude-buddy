@@ -35,6 +35,7 @@ fn symbol_name(s: &str) -> Option<&'static str> {
         0xEA8F => "bell",
         0xF2B7 => "globe",
         0xE7E8 => "power",
+        0xE895 => "arrow.triangle.2.circlepath",
         0xE771 => "circle.lefthalf.filled",
         0xED1A => "eye.slash",
         0xE740 => "arrow.up.left.and.arrow.down.right",

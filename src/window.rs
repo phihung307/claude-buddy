@@ -79,6 +79,8 @@ const VECTOR_PREP_MAX: f32 = 2.0;
 /// Full screen gives up at most this much of its size to show frames exactly as prepared, which costs
 /// a fraction of scaling them every frame.
 const FULL_SNAP: f32 = 0.9;
+/// How much of the screen the character may fill. Its frames are small, so any bigger is mostly blur.
+const MAX_SCREEN_SHARE: f32 = 0.6;
 /// The buddy never has the keyboard, so its skills are hotkeys: Ctrl+Alt+key anywhere, and plain Ctrl+key
 /// only while the pointer is on the buddy, so the rest of the time those stay with other apps (Ctrl+W
 /// closes their tabs, Ctrl+R reloads). Global ids count from 1, the hover ones from HOVER_HOTKEY.
@@ -678,12 +680,14 @@ impl App {
         ((a.right - a.left) as f32 / self.scale, (a.bottom - a.top) as f32 / self.scale)
     }
 
-    /// The zoom at which the character is as big as the screen allows: full screen.
+    /// The biggest the character may be: what R goes to and where the wheel stops. A small screen still
+    /// gets the three sizes, as far as they fit.
     fn max_zoom(&self) -> f32 {
         let (bw, bh, mw, mh) = self.char_dims();
         let (aw, ah) = self.area_logical();
         // The gap under the feet grows with the character too.
-        (ah / (bh + mh + CHAR_GAP)).min(aw / (bw + mw)).max(MIN_ZOOM)
+        let fits = (ah / (bh + mh + CHAR_GAP)).min(aw / (bw + mw));
+        (fits * MAX_SCREEN_SHARE).max(SIZE_FACTORS[2]).min(fits).max(MIN_ZOOM)
     }
 
     /// Pixel density of character `id` at full screen, once its size is known: it is the one on screen.
@@ -707,9 +711,7 @@ impl App {
         let (bw, bh, mw, mh) = self.char_dims();
         let f = self.config.zoom;
         let (aw, ah) = self.area_logical();
-        // Full screen spans the screen: with no room left over the character, the bubble and panel
-        // go beside it.
-        let w = if self.full_restore.is_some() { aw } else { WIN_W.max((bw + mw) * f).min(aw) };
+        let w = WIN_W.max((bw + mw) * f).min(aw);
         let h = WIN_H.max((bh + mh + CHAR_GAP) * f + UI_ROOM).min(ah);
         ((w * self.scale).ceil() as u32, (h * self.scale).ceil() as u32)
     }
@@ -1314,9 +1316,11 @@ impl App {
             return;
         };
         self.current_sounds = c.sounds.clone();
-        // A built-in shows a still picture right away, and comes alive once its loops are ready.
-        if let Source::Vector(i) = c.source {
-            self.visual = Visual::Vector(i);
+        // A built-in shows a still picture right away, and comes alive once its loops are ready. One
+        // already alive keeps moving while sharper frames load, and full_density below stays known.
+        let alive = matches!(self.visual, Visual::Media { .. }) && self.shown_id == c.id;
+        if let (Source::Vector(i), false) = (&c.source, alive) {
+            self.visual = Visual::Vector(*i);
             self.after_visual_change();
         }
         let (token, hwnd, scale, full) = (self.load_token, self.hwnd as isize, self.scale, self.full_density(&c.id));
@@ -1626,6 +1630,7 @@ impl App {
 
     fn housekeeping(&mut self) {
         let now = now_ms();
+        self.shared.store.lock().unwrap().persist();
         if crate::update::ready() && picker::window().is_null() && self.drag.is_none() && crate::update::apply() {
             unsafe { DestroyWindow(self.hwnd) };
             return;
@@ -1647,7 +1652,7 @@ impl App {
                     pending.push(t);
                 }
             }
-            let ticked = st.tick(now);
+            let ticked = st.tick(now) | st.forget_closed(process_alive);
             !dead.is_empty() || ticked
         };
         if self.note_until != 0 && now >= self.note_until {
@@ -1766,7 +1771,7 @@ impl App {
             // The keys as they work with the pointer on the buddy; anywhere else, with Alt too.
             add(m, CMD_BLINK, t("Phi Lôi Thần\tCtrl+Q", "Flying Thunder God\tCtrl+Q"), false);
             add(m, CMD_CLONES, t("Ảnh phân thân\tCtrl+W", "Shadow clones\tCtrl+W"), !self.bunshin.is_empty());
-            add(m, CMD_FULL, t("Toàn màn hình\tCtrl+R", "Full screen\tCtrl+R"), self.full_restore.is_some());
+            add(m, CMD_FULL, t("Phóng to\tCtrl+R", "Make it big\tCtrl+R"), self.full_restore.is_some());
             add(m, CMD_AUTO_SKILLS, t("Tự dùng skill theo phiên", "Skills follow the sessions"), self.auto_skills_on());
             AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
             let chars = CreatePopupMenu();
@@ -2204,6 +2209,7 @@ pub fn run() {
     theme::set_translucent(config.translucent);
     crate::update::start(config.auto_update);
     let shared = Arc::new(Shared::default());
+    shared.store.lock().unwrap().restore(now_ms(), process_alive);
     if let Err(e) = server::start(shared.clone(), config.port) {
         message_box(&crate::tf!("Không mở được cổng {}: {e}\nĐổi \"port\" trong config.json của app.", "Could not open port {}: {e}\nChange \"port\" in the app's config.json.", config.port), MB_OK | MB_ICONERROR);
         return;

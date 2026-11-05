@@ -10,7 +10,7 @@ you, done, or failed. For Windows 10/11 and macOS 11 or later.
 - **See your sessions at a glance:** the character shows whether Claude is working, needs you, is done, or hit an error.
   Click it to jump to that session's window.
 - **Create a character from a description:** Codex draws it with all five states animated, including turning around and
-  fight moves. No Codex? Use ChatGPT and drop the ZIP on the app.
+  celebrating when the work is done. No Codex? Use ChatGPT and drop the ZIP on the app.
 - **Change it with another prompt:** "add a red hat" redraws it, and Codex remembers what it made.
 - **Share characters:** one `.buddy` file, double-click to add.
 - **Add your own:** WebM, MP4, PNG, APNG, GIF, WebP, JPG or SVG.
@@ -87,8 +87,8 @@ This removes the app, its login item and its hooks. Settings, usage data and add
 | Click the bubble | Opens the window of the session that most needs attention |
 | Click a session row | Opens that session's terminal or IDE window |
 | Drag the character | Anywhere on the screen; the position is remembered |
-| Scroll on the character (Windows) | Makes it bigger or smaller, up to the size of the screen |
-| Point at the character, then Ctrl+Q / Ctrl+W / Ctrl+R (Windows) | Skills: teleport to another corner / shadow clones in the corners / full screen and back. Anywhere else, add Alt (Ctrl+Alt+Q…). After a skill, the Ctrl keys stay with the buddy for 4 seconds, so the next one needs no pointing |
+| Scroll on the character (Windows) | Makes it bigger or smaller, up to 60% of the screen |
+| Point at the character, then Ctrl+Q / Ctrl+W / Ctrl+R (Windows) | Skills: teleport to another corner / shadow clones in the corners / biggest size and back. Anywhere else, add Alt (Ctrl+Alt+Q…). After a skill, the Ctrl keys stay with the buddy for 4 seconds, so the next one needs no pointing |
 | Right-click the character or tray icon | Quick menu |
 | Click the tray icon (Windows) | Opens the main window (Characters, Usage, Settings) |
 | Click the menu bar icon (macOS) | Quick menu, with the main window under **Manage characters**, **View usage** and **Settings** |
@@ -162,8 +162,7 @@ file per state):
 Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
 file).
 
-On Windows, images larger than the usual size (1024 pixels, say) stay sharp when the character is made bigger or full
-screen.
+On Windows, images larger than the usual size (1024 pixels, say) stay sharp when the character is made bigger.
 
 On Windows, with `"autoSkills": true` in `character.json`, the character's skills go off by themselves:
 
@@ -173,7 +172,7 @@ On Windows, with `"autoSkills": true` in `character.json`, the character's skill
 | A session needs you | Teleports to the corner nearest the mouse pointer |
 | Sessions are done | Teleports to another corner |
 
-Not while full screen, while the screen is locked, or while you drag the character. Turn it on or off for any character
+Not while Ctrl+R has it at its biggest, while the screen is locked, or while you drag the character. Turn it on or off for any character
 from the right-click menu (**Skills follow the sessions**).
 
 ## Configuration

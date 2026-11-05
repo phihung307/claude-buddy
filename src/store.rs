@@ -9,6 +9,11 @@ const MAX_TEXT: usize = 120;
 const DONE_DECAY_MS: u64 = 5 * 60_000;
 const WORKING_STALE_MS: u64 = 15 * 60_000;
 const STALE_MS: u64 = 30 * 60_000;
+/// A session whose Claude process is still there stays listed however quiet it is. This only bounds
+/// the case of its process id having gone to some other program.
+const LIVE_STALE_MS: u64 = 24 * 60 * 60_000;
+#[cfg(any(windows, target_os = "macos"))]
+const SESSIONS_FILE: &str = "sessions.json";
 /// Turns shorter than this finish silently: a sound for every one-liner would be noise.
 const MIN_WORK_MS_FOR_NOTIFY: u64 = 10_000;
 
@@ -326,7 +331,8 @@ impl Store {
         let mut changed = false;
         self.sessions.retain(|_, s| {
             let age = now.saturating_sub(s.updated_at);
-            if age > STALE_MS || (s.ended && age > DONE_DECAY_MS && s.state != State::Error) {
+            let limit = if s.pid.is_some() && s.state != State::Error { LIVE_STALE_MS } else { STALE_MS };
+            if age > limit || (s.ended && age > DONE_DECAY_MS && s.state != State::Error) {
                 changed = true;
                 return false;
             }
@@ -343,6 +349,84 @@ impl Store {
             true
         });
         changed
+    }
+
+    /// Takes away quiet sessions whose Claude has exited, like a terminal closed without a word. A
+    /// session that was busy gets `fail` instead, so the loss shows. Returns true if any went.
+    pub fn forget_closed(&mut self, alive: impl Fn(u32) -> bool) -> bool {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, s| !matches!(s.state, State::Idle | State::Done) || s.pid.is_none_or(&alive));
+        self.sessions.len() != before
+    }
+
+    fn to_json(&self) -> String {
+        let all: Vec<Value> = self.sessions.values().map(|s| json!({
+            "id": s.id, "label": s.label, "source": s.source, "state": s.state.name(), "updatedAt": s.updated_at,
+            "cwd": s.cwd, "pid": s.pid, "url": s.url, "title": s.title, "task": s.task, "summary": s.summary,
+            "message": s.message, "activity": s.activity, "step": s.step, "ended": s.ended, "workStartedAt": s.work_started_at,
+        })).collect();
+        Value::Array(all).to_string()
+    }
+
+    /// Sessions from a saved list that are still worth showing. Nothing is announced for them: this
+    /// is only the app finding its place again after a restart or an update.
+    fn load_json(&mut self, text: &str, now: u64, alive: impl Fn(u32) -> bool) {
+        let Ok(Value::Array(all)) = serde_json::from_str::<Value>(text) else { return };
+        for v in &all {
+            let string = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+            let (Some(id), Some(state)) = (string("id"), string("state").as_deref().and_then(State::parse)) else { continue };
+            let pid = v.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok());
+            let updated_at = v.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+            let ended = v.get("ended").and_then(Value::as_bool).unwrap_or(false);
+            let gone = pid.is_some_and(|p| !alive(p)) || (pid.is_none() && now.saturating_sub(updated_at) > STALE_MS);
+            if gone || ended {
+                continue;
+            }
+            let session = Session {
+                label: string("label").unwrap_or_else(|| id.clone()),
+                source: string("source").unwrap_or_else(|| "cli".into()),
+                state,
+                updated_at,
+                cwd: string("cwd"),
+                pid,
+                url: string("url"),
+                title: string("title"),
+                task: string("task"),
+                summary: string("summary"),
+                message: string("message"),
+                activity: string("activity"),
+                step: string("step"),
+                steps: Vec::new(),
+                ended,
+                work_started_at: v.get("workStartedAt").and_then(Value::as_u64),
+                id: id.clone(),
+            };
+            self.sessions.insert(id, session);
+        }
+    }
+
+    /// Keeps the list on disk, so a restart doesn't empty it. Written only when it changed.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn persist(&self) {
+        static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let text = self.to_json();
+        let mut last = LAST.lock().unwrap();
+        if *last == text {
+            return;
+        }
+        let dir = crate::config::dir();
+        let tmp = dir.join("sessions.json.tmp");
+        if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, dir.join(SESSIONS_FILE)).is_ok() {
+            *last = text;
+        }
+    }
+
+    /// Picks up what `persist` left.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn restore(&mut self, now: u64, alive: impl Fn(u32) -> bool) {
+        if let Ok(text) = std::fs::read_to_string(crate::config::dir().join(SESSIONS_FILE)) {
+            self.load_json(&text, now, alive);
+        }
     }
 
     pub fn list(&self) -> Vec<Session> {
@@ -577,6 +661,66 @@ mod tests {
         assert!(st.tick(WORKING_STALE_MS + 1));
         assert_eq!(st.get("work").unwrap().state, State::Idle);
         assert!(st.tick(STALE_MS + 1));
+        assert!(st.list().is_empty());
+    }
+
+    fn with_pid(id: &str, event: &str, pid: u32) -> Event {
+        Event { pid: Some(pid), ..ev(id, event) }
+    }
+
+    #[test]
+    fn a_quiet_session_stays_while_its_claude_runs() {
+        let mut st = Store::default();
+        st.apply(&with_pid("live", "SessionStart", 7), 0).unwrap();
+        st.apply(&ev("unknown", "SessionStart"), 0).unwrap();
+        st.tick(STALE_MS + 1);
+        assert!(st.get("live").is_some());
+        assert!(st.get("unknown").is_none());
+        st.tick(LIVE_STALE_MS + 1);
+        assert!(st.get("live").is_none());
+    }
+
+    #[test]
+    fn a_closed_terminal_takes_its_quiet_session_along() {
+        let mut st = Store::default();
+        st.apply(&with_pid("closed", "SessionStart", 7), 0).unwrap();
+        st.apply(&with_pid("open", "SessionStart", 8), 0).unwrap();
+        st.apply(&with_pid("busy", "PreToolUse", 9), 0).unwrap();
+        st.apply(&ev("no-pid", "SessionStart"), 0).unwrap();
+        assert!(st.forget_closed(|p| p == 8));
+        assert!(st.get("closed").is_none());
+        assert!(st.get("open").is_some());
+        assert!(st.get("busy").is_some(), "a busy one is reported as failed instead");
+        assert!(st.get("no-pid").is_some());
+        assert!(!st.forget_closed(|p| p == 8));
+    }
+
+    #[test]
+    fn the_list_survives_a_restart() {
+        let mut st = Store::default();
+        let start = Event { cwd: Some("C:/shop".into()), ..with_pid("alive", "PreToolUse", 7) };
+        st.apply(&start, 100).unwrap();
+        st.apply(&with_pid("exited", "SessionStart", 8), 100).unwrap();
+        st.apply(&ev("recent", "SessionStart"), 100).unwrap();
+        st.apply(&ev("old", "SessionStart"), 0).unwrap();
+        st.apply(&ev("ended", "Stop"), 100).unwrap();
+        st.apply(&ev("ended", "SessionEnd"), 100).unwrap();
+        let text = st.to_json();
+        let mut back = Store::default();
+        back.load_json(&text, STALE_MS + 50, |p| p == 7);
+        let alive = back.get("alive").unwrap();
+        assert_eq!((alive.state, alive.pid, alive.cwd.as_deref(), alive.updated_at), (State::Working, Some(7), Some("C:/shop"), 100));
+        assert!(back.get("recent").is_some());
+        for gone in ["exited", "old", "ended"] {
+            assert!(back.get(gone).is_none(), "{gone}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_list_is_ignored() {
+        let mut st = Store::default();
+        st.load_json("not json", 0, |_| true);
+        st.load_json(r#"[{"state":"idle"},{"id":"a","state":"nonsense"},5]"#, 0, |_| true);
         assert!(st.list().is_empty());
     }
 

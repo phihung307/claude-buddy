@@ -61,6 +61,7 @@ const ICON_SOUND: &str = "\u{E767}";
 const ICON_BELL: &str = "\u{EA8F}";
 const ICON_LANGUAGE: &str = "\u{F2B7}";
 const ICON_POWER: &str = "\u{E7E8}";
+const ICON_UPDATE: &str = "\u{E895}";
 const ICON_TRANSLUCENT: &str = "\u{E771}";
 const ICON_HIDE: &str = "\u{ED1A}";
 const ICON_RESIZE: &str = "\u{E740}";
@@ -637,7 +638,7 @@ impl Picker {
             (ICON_SOUND, t("Âm báo", "Sounds"), t("Khi Claude xong việc, cần bạn hoặc gặp lỗi", "When Claude finishes, needs you or hits an error"), s.sound, Setting::Sound),
             (ICON_BELL, if cfg!(windows) { t("Thông báo Windows", "Windows notifications") } else { t("Thông báo", "Notifications") }, if cfg!(windows) { t("Không hiện khi trình chiếu hoặc bật Focus Assist", "Not shown during presentations or Focus Assist") } else { t("Hiện ở góc màn hình khi Claude xong việc hoặc cần bạn", "Shown in the corner of the screen when Claude finishes or needs you") }, s.toasts, Setting::Toasts),
             (ICON_POWER, if cfg!(windows) { t("Khởi động cùng Windows", "Start with Windows") } else { t("Mở khi đăng nhập", "Open at login") }, t("Mở Claude Buddy khi đăng nhập", "Open Claude Buddy when you sign in"), s.autostart, Setting::Autostart),
-            (ICON_POWER, t("Tự động cập nhật", "Update automatically"), &update_note, s.auto_update, Setting::AutoUpdate),
+            (ICON_UPDATE, t("Tự động cập nhật", "Update automatically"), &update_note, s.auto_update, Setting::AutoUpdate),
             (ICON_TRANSLUCENT, t("Hiệu ứng trong mờ", "Transparency effects"), t("Nền cửa sổ trong mờ theo Windows; tự tắt khi Windows tắt Transparency effects", "See-through window backgrounds; turns off when Windows turns off transparency effects"), s.translucent, Setting::Translucent),
         ];
         // Pages are solid on a Mac, so there is nothing for this one to change.

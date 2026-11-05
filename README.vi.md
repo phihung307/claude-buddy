@@ -38,10 +38,10 @@ App chưa được ký số, nên Windows SmartScreen hoặc phần mềm diệt
 
 ### macOS
 
-Mở Terminal. Chạy trên chip Apple và Intel. Bản macOS mới hơn bản Windows và được thử nghiệm ít hơn.
+Mở Terminal. Chạy trên chip Apple và Intel.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.3 sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | sh
 ```
 
 Lệnh này cài `Claude Buddy.app` vào `~/Applications`, thêm hook vào Claude Code rồi mở app. `settings.json` được sao lưu

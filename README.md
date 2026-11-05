@@ -38,10 +38,10 @@ The app isn't code-signed, so Windows SmartScreen or antivirus software may warn
 
 ### macOS
 
-Open Terminal. Works on Apple silicon and Intel. The macOS version is newer than the Windows one and has had less testing.
+Open Terminal. Works on Apple silicon and Intel.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.3 sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | sh
 ```
 
 This installs `Claude Buddy.app` in `~/Applications`, adds its hooks to Claude Code and starts it. `settings.json` is

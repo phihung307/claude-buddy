@@ -80,7 +80,8 @@ const WTS_SESSION_LOCK: u32 = 7;
 const WTS_SESSION_UNLOCK: u32 = 8;
 const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
 const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0;
-const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID { data1: 0x6FE69556, data2: 0x704A, data3: 0x47A0, data4: [0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47] };
+/// The display of this session. The console one stays off for as long as someone works over Remote Desktop.
+const GUID_SESSION_DISPLAY_STATUS: GUID = GUID { data1: 0x2B84C20E, data2: 0xAD23, data3: 0x4DDF, data4: [0x93, 0xDB, 0x05, 0xFF, 0xBD, 0x7E, 0xFC, 0xA5] };
 /// Same gap under the character as the drawing code leaves.
 const CHAR_GAP: f32 = 4.0;
 /// The vector characters' body and shadow, without the empty sides of their drawing square.
@@ -1216,7 +1217,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_POWERBROADCAST => {
             if wp as u32 == PBT_POWERSETTINGCHANGE {
                 let s = &*(lp as *const POWERBROADCAST_SETTING);
-                if s.PowerSetting.data1 == GUID_CONSOLE_DISPLAY_STATE.data1 {
+                if s.PowerSetting.data1 == GUID_SESSION_DISPLAY_STATUS.data1 {
                     let off = s.Data[0] == 0;
                     with_app(|a| a.set_watching(a.session_locked, off));
                 }
@@ -1496,7 +1497,7 @@ pub fn run() {
         SetTimer(hwnd, TIMER_HOUSEKEEPING, HOUSEKEEPING_MS, None);
         // Nobody sees animation on a locked or dark screen, so it stops completely until they can.
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-        RegisterPowerSettingNotification(hwnd as *mut _, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+        RegisterPowerSettingNotification(hwnd as *mut _, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
         shared.hwnd.store(hwnd as isize, Ordering::Relaxed);
         usage::request_scan(shared.clone());
         if ask_hooks {

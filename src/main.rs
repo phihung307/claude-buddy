@@ -12,6 +12,7 @@ mod anim;
 mod codex;
 mod config;
 mod focus;
+mod fx;
 mod hook;
 mod hooks_config;
 mod i18n;

@@ -304,32 +304,40 @@ fn build_media(c: &Character, dir: &Path, max_w: f32, max_h: f32, dpi: f32) -> R
             files.len() - 1
         });
     }
-    let mut decoded: Vec<Option<Frames>> = Vec::with_capacity(files.len());
+    // Each file is decoded twice, one at a time: once to measure it for the stage, once to scale it.
+    // Holding the raw frames of every state at once is more than big clips allow: five 1024 clips
+    // came to nearly 3 GB, against about one clip's worth this way.
+    let mut measured: Vec<Option<SourceBox>> = Vec::with_capacity(files.len());
     let mut idle_error = None;
     for (i, f) in files.iter().enumerate() {
         match media::decode_file(&dir.join(f), false) {
-            Ok(d) => decoded.push(Some(d)),
+            Ok(d) => measured.push(Some(box_of(&d))),
             Err(e) => {
                 if i == state_file[0] {
                     idle_error = Some(format!("{f}: {e}"));
                 }
-                decoded.push(None);
+                measured.push(None);
             }
         }
     }
     if let Some(e) = idle_error {
         return Err(e);
     }
-    let live: Vec<usize> = (0..decoded.len()).filter(|i| decoded[*i].is_some()).collect();
-    let boxes: Vec<SourceBox> = live.iter().filter_map(|i| decoded[*i].as_ref()).map(box_of).collect();
+    let live: Vec<usize> = (0..measured.len()).filter(|i| measured[*i].is_some()).collect();
+    let boxes: Vec<SourceBox> = live.iter().filter_map(|i| measured[*i]).collect();
     let (lw, lh, places) = plan_stage(&boxes, max_w, max_h);
     let (w, h) = (((lw * dpi).ceil() as u32).max(1), ((lh * dpi).ceil() as u32).max(1));
 
     let mut store = Vec::new();
-    let mut clip_of_file = vec![usize::MAX; decoded.len()];
+    let mut clip_of_file = vec![usize::MAX; measured.len()];
     let mut clips = Vec::with_capacity(live.len());
     for (n, i) in live.iter().enumerate() {
-        let Some(f) = decoded[*i].take() else { continue };
+        let f = match media::decode_file(&dir.join(&files[*i]), false) {
+            Ok(f) => f,
+            // Read fine a moment ago: changed on disk since. Only idle can't do without.
+            Err(e) if *i == state_file[0] => return Err(format!("{}: {e}", files[*i])),
+            Err(_) => continue,
+        };
         let p = places[n];
         let per_pixel = 1.0 / (p.factor * dpi);
         let mut r = Resampler::new(f.w, f.h, -p.left / p.factor, -p.top / p.factor, per_pixel, w, h);
@@ -591,6 +599,15 @@ pub fn load(c: &Character, max_w: f32, max_h: f32, dpi: f32) -> Result<Arc<CharA
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
     open().map(Arc::new).ok_or_else(|| t("không đọc được file đã chuẩn bị", "could not read the prepared file").to_string())
+}
+
+/// The pixel density at which a media character's frames hold one source pixel each, judged from the
+/// first frame of idle: preparing any denser only stores upscaled blur. None for drawn characters.
+pub fn native_dpi(c: &Character, max_w: f32, max_h: f32) -> Option<f32> {
+    let dir = c.dir()?;
+    let f = media::decode_file(&dir.join(&c.states[0].file), true).ok()?;
+    let b = box_of(&f);
+    Some((b.h / max_h).max(b.w / max_w)).filter(|d| d.is_finite() && *d > 0.0)
 }
 
 /// Keeps the cache from growing forever: only the newest few builds of a character stay, enough for

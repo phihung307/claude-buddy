@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs Claude Buddy on macOS: curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | sh
-# BUDDY_VERSION=v0.3.2 picks a release other than the latest.
+# BUDDY_VERSION=v0.3.3 picks a release other than the latest.
 set -eu
 
 REPO="taivt0109/claude-buddy"

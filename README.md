@@ -39,7 +39,7 @@ The app isn't code-signed, so Windows SmartScreen or antivirus software may warn
 macOS 11 or later, Apple silicon or Intel. Not signed by Apple yet, and still being tested.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.1 sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | BUDDY_VERSION=v0.3.2 sh
 ```
 
 To remove it, run `curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh`.

@@ -38,6 +38,7 @@ use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, Get
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows_sys::Win32::UI::Shell::*;
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_WAKE: u32 = WM_APP + 1;
@@ -61,6 +62,10 @@ const TIMER_PANEL: usize = 4;
 const TIMER_HOVER: usize = 5;
 const TIMER_TRIM: usize = 6;
 const TIMER_SCAN: usize = 7;
+const TIMER_ZORDER: usize = 8;
+/// Long enough for a window coming to the front to be in place.
+const ZORDER_DELAY_MS: u32 = 200;
+const MAX_WINDOWS_WALKED: usize = 512;
 const TRIM_DELAY_MS: u32 = 3_000;
 /// A finished turn is counted after this, so a burst of them costs one scan.
 const SCAN_DELAY_MS: u32 = 20_000;
@@ -147,6 +152,31 @@ fn set_autostart(on: bool) {
         } else {
             RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
         }
+    }
+}
+
+/// Windows can leave a window marked topmost with ordinary windows above it, so the mark can't be trusted.
+fn normal_window_above(hwnd: HWND) -> bool {
+    unsafe {
+        let mut w = GetWindow(hwnd, GW_HWNDPREV);
+        for _ in 0..MAX_WINDOWS_WALKED {
+            if w.is_null() {
+                return false;
+            }
+            if IsWindowVisible(w) != 0 && GetWindowLongPtrW(w, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0 {
+                return true;
+            }
+            w = GetWindow(w, GW_HWNDPREV);
+        }
+        false
+    }
+}
+
+/// Another program came to the front. Checked a moment later, once it has finished arranging its windows.
+unsafe extern "system" fn foreground_changed(_hook: HWINEVENTHOOK, _event: u32, _window: HWND, _object: i32, _child: i32, _thread: u32, _time: u32) {
+    let hwnd = with_app(|a| a.hwnd);
+    if let Some(hwnd) = hwnd {
+        SetTimer(hwnd, TIMER_ZORDER, ZORDER_DELAY_MS, None);
     }
 }
 
@@ -842,6 +872,10 @@ impl App {
                 self.behind_picker = in_use;
                 let after = if in_use { picker } else { HWND_TOPMOST };
                 SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            } else if !in_use && normal_window_above(self.hwnd) {
+                // Setting it again does nothing while Windows believes it is already topmost.
+                SetWindowPos(self.hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
     }
@@ -1051,6 +1085,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     // Startup and one-off work leave pages behind that the app won't touch again.
                     KillTimer(hwnd, TIMER_TRIM);
                     K32EmptyWorkingSet(GetCurrentProcess());
+                }),
+                TIMER_ZORDER => with_app(|a| {
+                    KillTimer(hwnd, TIMER_ZORDER);
+                    a.sync_z_order();
                 }),
                 TIMER_SCAN => with_app(|a| {
                     KillTimer(hwnd, TIMER_SCAN);
@@ -1470,6 +1508,8 @@ pub fn run() {
         });
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(hwnd, TIMER_HOUSEKEEPING, HOUSEKEEPING_MS, None);
+        // Calls back on this thread, and costs nothing between switches.
+        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, std::ptr::null_mut(), Some(foreground_changed), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         // Nobody sees animation on a locked or dark screen, so it stops completely until they can.
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         RegisterPowerSettingNotification(hwnd as *mut _, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);

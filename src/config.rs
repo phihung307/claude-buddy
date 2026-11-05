@@ -63,11 +63,54 @@ impl Default for Config {
     }
 }
 
+/// What the settings page can change.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Setting {
+    Hooks,
+    Sound,
+    Toasts,
+    Autostart,
+    AutoHide,
+    Translucent,
+    Size(u8),
+    /// 0 follows the system, 1 Vietnamese, 2 English.
+    Language(u8),
+    ResetPosition,
+    Folder,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct SettingsView {
+    pub hooks: bool,
+    pub sound: bool,
+    pub toasts: bool,
+    pub autostart: bool,
+    pub auto_hide: bool,
+    pub translucent: bool,
+    pub size: u8,
+    pub language: u8,
+}
+
 pub fn dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CLAUDE_BUDDY_RS_HOME") {
         return PathBuf::from(d);
     }
-    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("claude-buddy-rs")
+    let base = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default())
+    } else if cfg!(target_os = "macos") {
+        home().join("Library").join("Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from)
+    };
+    base.join("claude-buddy-rs")
+}
+
+pub fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default())
+}
+
+pub fn user_root() -> PathBuf {
+    dir().join("characters")
 }
 
 fn parse(text: &str) -> Config {

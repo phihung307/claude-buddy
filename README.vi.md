@@ -2,8 +2,8 @@
 
 [English](README.md) | **Tiếng Việt**
 
-Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chỉ
-chạy trên Windows 10/11.
+Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chạy
+trên Windows 10/11 và macOS 11 trở lên.
 
 ## Tính năng
 
@@ -20,6 +20,8 @@ chạy trên Windows 10/11.
 
 ## Cài đặt
 
+### Windows
+
 Mở PowerShell, không cần quyền admin.
 
 ```powershell
@@ -34,7 +36,22 @@ app sẽ hỏi lúc khởi động.
 
 App chưa được ký số, nên Windows SmartScreen hoặc phần mềm diệt virus có thể cảnh báo.
 
+### macOS
+
+Mở Terminal. Chạy trên chip Apple và Intel.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | sh
+```
+
+Lệnh này cài `Claude Buddy.app` vào `~/Applications`, thêm hook vào Claude Code rồi mở app. `settings.json` được sao lưu
+trước và các hook khác giữ nguyên. Chỉ các phiên Claude Code mở sau đó mới hiện lên. Chạy lại lệnh này để cập nhật.
+
+App chưa được Apple ký, nên macOS có thể từ chối mở bản tải bằng trình duyệt. Dùng lệnh trên thì không gặp cảnh báo này.
+
 ## Gỡ
+
+### Windows
 
 ```powershell
 irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 | iex
@@ -42,6 +59,15 @@ irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 
 
 Lệnh này xoá app, shortcut, mục khởi động cùng Windows và hook. Cài đặt, số liệu và nhân vật đã thêm vẫn nằm ở
 `%APPDATA%\claude-buddy-rs`, trừ khi bạn đặt `$env:CLAUDE_BUDDY_PURGE = "1"` trước.
+
+### macOS
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh
+```
+
+Lệnh này xoá app, mục mở khi đăng nhập và hook. Cài đặt, số liệu và nhân vật đã thêm vẫn nằm ở
+`~/Library/Application Support/claude-buddy-rs`; muốn xoá hẳn thì xoá luôn thư mục đó.
 
 ## Dùng
 
@@ -55,27 +81,35 @@ Lệnh này xoá app, shortcut, mục khởi động cùng Windows và hook. Cà
 | Lăn chuột trên nhân vật | Phóng to hoặc thu nhỏ, tối đa bằng màn hình |
 | Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R | Skill: dịch chuyển sang góc khác / phân thân ở các góc / toàn màn hình và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
 | Chuột phải nhân vật hoặc icon khay | Menu nhanh |
-| Bấm icon khay | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
+| Bấm icon khay (Windows) | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
+| Bấm icon thanh menu (macOS) | Menu nhanh, mở cửa sổ chính bằng **Quản lý nhân vật**, **Xem mức dùng** và **Cài đặt** |
 | Bấm **Chia sẻ** ở nhân vật bạn đã thêm | Lưu thành file `.buddy` |
 | Bấm đúp file `.buddy`, hoặc kéo nó hay file zip vào cửa sổ chính | Thêm nhân vật đó |
 
-Đóng cửa sổ chính thì app vẫn chạy dưới khay. Thoát hẳn bằng menu chuột phải.
+Đóng cửa sổ chính thì app vẫn chạy dưới khay hoặc trên thanh menu. Thoát hẳn bằng menu chuột phải.
 
-Giao diện có tiếng Anh và tiếng Việt, mặc định theo Windows; đổi trong Cài đặt > Ngôn ngữ.
+Giao diện có tiếng Anh và tiếng Việt, mặc định theo hệ thống; đổi trong Cài đặt > Ngôn ngữ.
+
+### Khác biệt trên macOS
+
+- Mở một phiên sẽ đưa terminal hoặc IDE của phiên đó ra trước, nhưng chưa chọn được đúng cửa sổ nếu chương trình có nhiều cửa sổ.
+- Chưa có nền cửa sổ trong mờ.
+- Thông báo được gửi qua công cụ script của hệ thống, nên macOS có thể hỏi quyền hoặc hiện tên công cụ đó.
 
 ## Không che và không làm phiền
 
 - Bong bóng chỉ hiện vài giây khi trạng thái đổi, rộng vừa đủ nội dung. Chỉ phiên cần bạn hoặc bị lỗi mới ở lại.
-- Icon khay có chấm màu theo trạng thái, nên xem nhanh được mà không cần gì trên màn hình.
+- Icon khay hoặc thanh menu có chấm màu theo trạng thái, nên xem nhanh được mà không cần gì trên màn hình.
 - Vùng trong suốt của cửa sổ buddy cho chuột đi xuyên qua; bấm vào buddy không lấy focus khỏi app đang gõ.
 - Tự ẩn khi trình chiếu, xem phim hay chơi game toàn màn hình, rồi tự hiện lại.
-- Không kêu và không hiện thông báo khi đang toàn màn hình, bật Focus Assist, hoặc khi bạn đang ở đúng cửa sổ của phiên đó.
+- Không kêu và không hiện thông báo khi đang toàn màn hình hoặc bật Focus Assist trên Windows, hoặc khi bạn đang ở đúng cửa sổ
+  của phiên đó (trên macOS là đúng chương trình).
 - Nhân vật có ba cỡ. Những thứ trên chỉnh trong Cài đặt.
 
 ## Mức dùng
 
 Hôm nay, tuần này (từ thứ Hai), tháng này và 14 ngày gần nhất, theo giờ máy. Số liệu đếm từ transcript trong
-`%USERPROFILE%\.claude\projects` (cả subagent), chỉ đọc các con số `usage`, không đọc nội dung hội thoại. Số lớn là
+`.claude/projects` ở thư mục người dùng (cả subagent), chỉ đọc các con số `usage`, không đọc nội dung hội thoại. Số lớn là
 đầu vào + đầu ra + ghi cache; đọc cache tính riêng. Không gồm Claude dùng trên máy khác hay trên web.
 
 ## Tạo nhân vật bằng Codex
@@ -127,7 +161,8 @@ trong menu chuột phải (**Tự dùng skill theo phiên**).
 
 ## Cấu hình
 
-`%APPDATA%\claude-buddy-rs\config.json`, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
+`config.json` trong `%APPDATA%\claude-buddy-rs` trên Windows hoặc `~/Library/Application Support/claude-buddy-rs` trên
+macOS, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
 Mục `autoCloneSeconds` (mặc định 20) là số giây các phiên làm việc trước khi phân thân xuất hiện.
 
 ## API cục bộ
@@ -142,14 +177,17 @@ Chỉ nghe trên `127.0.0.1`. Từ chối request có header `Origin` hoặc `Ho
 
 ```
 cargo build --release
-target\release\claude-buddy-rs.exe
+target\release\claude-buddy-rs.exe     # Windows
+target/release/claude-buddy-rs         # macOS
 ```
 
-Cần Rust và Windows SDK (để nhúng icon). Lần đầu app hỏi có kết nối với Claude Code không. Nếu đồng ý, app thêm hook của
-riêng nó vào `%USERPROFILE%\.claude\settings.json` và giữ bản sao lưu `settings.json.buddy-rs-backup-*`.
+Cần Rust, cộng với Windows SDK trên Windows (để nhúng icon) hoặc Xcode Command Line Tools trên macOS. Lần đầu app hỏi có
+kết nối với Claude Code không. Nếu đồng ý, app thêm hook của riêng nó vào `.claude/settings.json` ở thư mục người dùng và
+giữ bản sao lưu `settings.json.buddy-rs-backup-*`.
 
-Hook lưu đường dẫn đầy đủ tới file exe. Nếu chuyển file exe đi nơi khác, hãy kết nối lại trong Cài đặt. Nếu tự xoá file
-exe, hãy tắt "Kết nối Claude Code" trước (hoặc chạy `--remove-hooks`), nếu không Claude Code sẽ báo lỗi hook.
+`scripts/package-macos.sh` đóng gói app macOS từ bản release cho cả hai loại chip.
+
+Hook lưu đường dẫn đầy đủ tới chương trình. Nếu chuyển nó đi nơi khác, hãy kết nối lại trong Cài đặt. Nếu tự xoá nó, hãy tắt "Kết nối Claude Code" trước (hoặc chạy `--remove-hooks`), nếu không Claude Code sẽ báo lỗi hook.
 
 ## Phát triển
 
@@ -163,7 +201,8 @@ Lệnh thứ hai xuất ảnh PNG của nhân vật và cửa sổ. Lệnh thứ
 
 Biến môi trường để kiểm tra mà không đụng dữ liệu thật: `CLAUDE_BUDDY_RS_HOME` (thư mục dữ liệu riêng, chạy song song
 được), `CLAUDE_CONFIG_DIR` (thư mục Claude), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`,
-`CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (không tạm dừng khi khoá máy, để đo CPU).
+`CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (Windows: không tạm dừng khi khoá máy, để đo CPU),
+`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: mở cửa sổ chính khi khởi động).
 
 ## Giấy phép
 

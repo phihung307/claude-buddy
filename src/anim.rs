@@ -13,8 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tiny_skia::{PixmapMut, Transform};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, GetFileSizeEx, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, OPEN_EXISTING};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READONLY};
 
 /// Bump when the cache format or the way frames are prepared changes.
@@ -76,10 +79,26 @@ unsafe impl Sync for Mapping {}
 
 impl Drop for Mapping {
     fn drop(&mut self) {
+        #[cfg(windows)]
         unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr as *mut _ }) };
+        #[cfg(unix)]
+        unsafe { libc::munmap(self.ptr as *mut _, self.len) };
     }
 }
 
+#[cfg(unix)]
+fn map_file(path: &Path) -> Option<Mapping> {
+    use std::os::fd::AsRawFd;
+    let file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len() as usize;
+    if len == 0 {
+        return None;
+    }
+    let view = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0) };
+    (view != libc::MAP_FAILED).then_some(Mapping { ptr: view as *const u8, len })
+}
+
+#[cfg(windows)]
 fn map_file(path: &Path) -> Option<Mapping> {
     let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -545,11 +564,14 @@ pub fn prepare_main(args: &[String]) -> i32 {
     let (Some(id), Some(max_w), Some(max_h), Some(dpi)) = (args.first(), num(1), num(2), num(3)) else {
         return 2;
     };
+    #[cfg(unix)]
+    unsafe { libc::nice(5) };
+    #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
-    let all = library::load_all(&crate::window::user_root());
+    let all = library::load_all(&crate::config::user_root());
     let Some(c) = all.iter().find(|c| c.id == *id) else {
         eprint!("{}", crate::tf!("không tìm thấy nhân vật {id}", "character {id} not found"));
         return 1;

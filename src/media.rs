@@ -372,7 +372,12 @@ pub fn decode_bytes(data: &[u8], path: &Path, first_only: bool) -> Result<Frames
     }
     match ext {
         ".webm" => decode_webm(data, first_only),
+        #[cfg(windows)]
         ".mp4" => crate::mf::decode_mp4(path, first_only, MIN_FRAME_MS),
+        #[cfg(target_os = "macos")]
+        ".mp4" => crate::mp4_mac::decode_mp4(path, first_only, MIN_FRAME_MS),
+        #[cfg(not(any(windows, target_os = "macos")))]
+        ".mp4" => Err(t("hệ điều hành này chưa đọc được MP4", "MP4 can't be read on this system yet").into()),
         ".gif" => {
             let d = GifDecoder::new(Cursor::new(data.to_vec())).map_err(|e| e.to_string())?;
             from_image_frames(d, first_only)

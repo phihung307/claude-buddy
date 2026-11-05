@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,8 +20,44 @@ jobs:
         run: |
           $hash = (Get-FileHash target/release/claude-buddy-rs.exe -Algorithm SHA256).Hash
           "$hash  claude-buddy-rs.exe" | Out-File -Encoding ascii target/release/claude-buddy-rs.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            target/release/claude-buddy-rs.exe
+            target/release/claude-buddy-rs.exe.sha256
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo test --release
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - name: Package
+        run: scripts/package-macos.sh
+      - name: Run it and look
+        run: scripts/check-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/ClaudeBuddy-macos.zip
+            dist/ClaudeBuddy-macos.zip.sha256
+            dist/mac-check-*
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
       - name: Publish
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" target/release/claude-buddy-rs.exe target/release/claude-buddy-rs.exe.sha256 --generate-notes --prerelease
+        # Stays out of the install command's way until it has been checked and promoted.
+        run: gh release create "${{ github.ref_name }}" assets/* --repo "${{ github.repository }}" --generate-notes --prerelease

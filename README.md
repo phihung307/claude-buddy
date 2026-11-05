@@ -3,7 +3,7 @@
 **English** | [Tiếng Việt](README.vi.md)
 
 A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
-you, done, or failed. Windows 10/11 only.
+you, done, or failed. For Windows 10/11 and macOS 11 or later.
 
 ## Features
 
@@ -20,6 +20,8 @@ you, done, or failed. Windows 10/11 only.
 
 ## Install
 
+### Windows
+
 Open PowerShell. No admin rights needed.
 
 ```powershell
@@ -34,7 +36,24 @@ asks when it starts.
 
 The app isn't code-signed, so Windows SmartScreen or antivirus software may warn about it.
 
+### macOS
+
+Open Terminal. Works on Apple silicon and Intel.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/install.sh | sh
+```
+
+This installs `Claude Buddy.app` in `~/Applications`, adds its hooks to Claude Code and starts it. `settings.json` is
+backed up first and your other hooks stay as they are. Only Claude Code sessions opened after that show up. Run the same
+command again to update.
+
+The app isn't signed by Apple, so macOS may refuse to open a copy you downloaded with a browser. The command above
+doesn't run into this.
+
 ## Uninstall
+
+### Windows
 
 ```powershell
 irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 | iex
@@ -42,6 +61,15 @@ irm https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.ps1 
 
 This removes the app, its shortcut, its autostart entry and its hooks. Settings, usage data and added characters stay
 in `%APPDATA%\claude-buddy-rs` unless you set `$env:CLAUDE_BUDDY_PURGE = "1"` first.
+
+### macOS
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/taivt0109/claude-buddy/main/uninstall.sh | sh
+```
+
+This removes the app, its login item and its hooks. Settings, usage data and added characters stay in
+`~/Library/Application Support/claude-buddy-rs`; delete that folder too if you don't want them.
 
 ## Using it
 
@@ -55,35 +83,43 @@ in `%APPDATA%\claude-buddy-rs` unless you set `$env:CLAUDE_BUDDY_PURGE = "1"` fi
 | Scroll on the character | Makes it bigger or smaller, up to the size of the screen |
 | Point at the character, then Ctrl+Q / Ctrl+W / Ctrl+R | Skills: teleport to another corner / shadow clones in the corners / full screen and back. Anywhere else, add Alt (Ctrl+Alt+Q…). After a skill, the Ctrl keys stay with the buddy for 4 seconds, so the next one needs no pointing |
 | Right-click the character or tray icon | Quick menu |
-| Click the tray icon | Opens the main window (Characters, Usage, Settings) |
+| Click the tray icon (Windows) | Opens the main window (Characters, Usage, Settings) |
+| Click the menu bar icon (macOS) | Quick menu, with the main window under **Manage characters**, **View usage** and **Settings** |
 | Click **Share** on a character you added | Saves it as a `.buddy` file |
 | Double-click a `.buddy` file, or drag it or a ZIP onto the main window | Adds that character |
 
-Closing the main window keeps the app running in the tray. Quit from the right-click menu.
+Closing the main window keeps the app running in the tray or menu bar. Quit from the right-click menu.
 
-The interface is in English and Vietnamese. It follows Windows by default; change it under Settings > Language.
+The interface is in English and Vietnamese. It follows the system by default; change it under Settings > Language.
+
+### Differences on macOS
+
+- Opening a session brings its terminal or IDE to the front, but can't choose between several windows of that program.
+- There is no see-through window background.
+- Notifications are sent through the system's scripting tool, so macOS may ask for permission or show it as their sender.
 
 ## Stays out of your way
 
 - Bubbles show for a few seconds when a status changes, just wide enough for their text. Only sessions that need you or
   failed stay up.
-- The tray icon has a dot colored by status, so you can check at a glance with nothing on the screen.
+- The tray or menu bar icon has a dot colored by status, so you can check at a glance with nothing on the screen.
 - Transparent parts of the buddy let the mouse through, and clicking the buddy doesn't take focus from what you're
   typing in.
 - Hides during full-screen presentations, movies and games, then comes back.
-- No sound or notification during full screen or Focus Assist, or when you're already in that session's window.
+- No sound or notification during full screen or Focus Assist on Windows, or when you're already in that session's window
+  (on macOS, in its program).
 - The character comes in three sizes. All of this can be changed in Settings.
 
 ## Usage
 
 Today, this week (from Monday), this month and the last 14 days, in local time. Numbers are counted from the transcripts
-in `%USERPROFILE%\.claude\projects` (subagents included), reading only the `usage` numbers and never the conversation.
+in `.claude/projects` in your home folder (subagents included), reading only the `usage` numbers and never the conversation.
 The big number is input + output + cache writes; cache reads are shown separately. Claude used on other machines or on
 the web isn't included.
 
 ## Creating a character with Codex
 
-If [Codex](https://openai.com/codex/) is installed and signed in on this PC, click **Create with Codex** on the Characters
+If [Codex](https://openai.com/codex/) is installed and signed in on this computer, click **Create with Codex** on the Characters
 page and describe the character you want. It takes about 6 to 10 minutes and uses your Codex quota. You get all five states
 as animations, and you can keep working in the meantime as long as the app's window stays open. Codex only draws: the app
 checks and cuts the images itself.
@@ -133,7 +169,8 @@ from the right-click menu (**Skills follow the sessions**).
 
 ## Configuration
 
-`%APPDATA%\claude-buddy-rs\config.json`, key `port` (default 47329). After changing the port, reconnect to Claude Code.
+`config.json` in `%APPDATA%\claude-buddy-rs` on Windows or `~/Library/Application Support/claude-buddy-rs` on macOS, key
+`port` (default 47329). After changing the port, reconnect to Claude Code.
 `autoCloneSeconds` (default 20) sets how long sessions work before the shadow clones come out.
 
 ## Local API
@@ -149,14 +186,17 @@ the app.
 
 ```
 cargo build --release
-target\release\claude-buddy-rs.exe
+target\release\claude-buddy-rs.exe     # Windows
+target/release/claude-buddy-rs         # macOS
 ```
 
-Needs Rust and the Windows SDK (to embed the icon). On first run the app asks whether to connect to Claude Code. If you
-agree, it adds its own hooks to `%USERPROFILE%\.claude\settings.json`, keeping a backup as
-`settings.json.buddy-rs-backup-*`.
+Needs Rust, plus the Windows SDK on Windows (to embed the icon) or the Xcode Command Line Tools on macOS. On first run the
+app asks whether to connect to Claude Code. If you agree, it adds its own hooks to `.claude/settings.json` in your home
+folder, keeping a backup as `settings.json.buddy-rs-backup-*`.
 
-The hooks store the full path to the exe. If you move the exe, reconnect in Settings. If you delete it by hand, turn off
+`scripts/package-macos.sh` builds the macOS app from release builds for both kinds of chip.
+
+The hooks store the full path to the program. If you move it, reconnect in Settings. If you delete it by hand, turn off
 "Connect to Claude Code" first (or run `--remove-hooks`), otherwise Claude Code reports hook errors.
 
 ## Development
@@ -172,7 +212,8 @@ in code.
 
 Environment variables for testing without touching real data: `CLAUDE_BUDDY_RS_HOME` (separate data folder, can run side
 by side), `CLAUDE_CONFIG_DIR` (Claude folder), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`,
-`CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (keeps animating while locked, for measuring CPU).
+`CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (Windows: keeps animating while locked, for measuring CPU),
+`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: opens the main window at start).
 
 ## License
 

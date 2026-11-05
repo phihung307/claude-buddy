@@ -7,28 +7,52 @@
 //!   claude-buddy-rs --cut-sheets <folder> <output folder>   cut sprite sheets into animated PNGs
 
 #![windows_subsystem = "windows"]
+// Linux only has the part without a window so far, so much of what it serves goes unused.
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code, unused_imports, unused_variables))]
 
 mod anim;
 mod codex;
 mod config;
+#[cfg(windows)]
 mod focus;
+#[cfg(target_os = "macos")]
+#[path = "focus_mac.rs"]
+mod focus;
+#[cfg(windows)]
 mod fx;
+#[cfg(windows)]
+#[path = "host_win.rs"]
+mod host;
+#[cfg(target_os = "macos")]
+#[path = "host_mac.rs"]
+mod host;
 mod hook;
 mod hooks_config;
 mod i18n;
 mod library;
 mod media;
+#[cfg(windows)]
 mod mf;
 mod motion;
+#[cfg(target_os = "macos")]
+mod mp4_mac;
+#[cfg(any(windows, target_os = "macos"))]
 mod picker;
 mod render;
 mod sheet;
 mod server;
+#[cfg(any(windows, target_os = "macos"))]
 mod sound;
 mod store;
+#[cfg(target_os = "macos")]
+mod text_mac;
 mod theme;
 mod usage;
 mod webm;
+#[cfg(windows)]
+mod window;
+#[cfg(target_os = "macos")]
+#[path = "window_mac.rs"]
 mod window;
 
 fn main() {
@@ -46,9 +70,15 @@ fn main() {
         Some("--scan-usage") => usage::scan_main(),
         Some("--prepare") => std::process::exit(anim::prepare_main(&args[1..])),
         Some("--cut-sheets") => std::process::exit(sheet::cut_main(&args[1..])),
-        Some("--install-hooks") => std::process::exit(window::hooks_cli(true)),
-        Some("--remove-hooks") => std::process::exit(window::hooks_cli(false)),
+        Some("--install-hooks") => std::process::exit(hooks_config::cli(true)),
+        Some("--remove-hooks") => std::process::exit(hooks_config::cli(false)),
+        #[cfg(any(windows, target_os = "macos"))]
         _ => window::run(),
+        #[cfg(not(any(windows, target_os = "macos")))]
+        _ => {
+            eprintln!("Claude Buddy has no window on this system yet. Hooks, usage and character tools work from the command line.");
+            std::process::exit(1);
+        }
     }
 }
 

@@ -4,7 +4,9 @@ use crate::store::State;
 use std::f32::consts::TAU;
 use std::sync::OnceLock;
 use std::path::Path;
+#[cfg(windows)]
 use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_MEMORY, SND_NODEFAULT};
+#[cfg(windows)]
 use windows_sys::Win32::Media::Multimedia::mciSendStringW;
 
 const RATE: u32 = 22_050;
@@ -44,12 +46,33 @@ fn wav(notes: &[Note]) -> Vec<u8> {
     out
 }
 
+#[cfg(windows)]
 fn mci(command: &str) {
     let c: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { mciSendStringW(c.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut()) };
 }
 
 /// A character's own sound. Falls back on silence rather than an error: it is only a sound.
+#[cfg(target_os = "macos")]
+pub fn play_file(path: &Path) {
+    let path = objc2_foundation::NSString::from_str(&path.display().to_string());
+    let sound = objc2_app_kit::NSSound::initWithContentsOfFile_byReference(<objc2_app_kit::NSSound as objc2::AllocAnyThread>::alloc(), &path, true);
+    if let Some(sound) = sound {
+        start(sound);
+    }
+}
+
+/// Kept until the next one, so it isn't released while it plays.
+#[cfg(target_os = "macos")]
+fn start(sound: objc2::rc::Retained<objc2_app_kit::NSSound>) {
+    thread_local! {
+        static PLAYING: std::cell::RefCell<Option<objc2::rc::Retained<objc2_app_kit::NSSound>>> = const { std::cell::RefCell::new(None) };
+    }
+    sound.play();
+    PLAYING.with(|p| *p.borrow_mut() = Some(sound));
+}
+
+#[cfg(windows)]
 pub fn play_file(path: &Path) {
     let is_mp3 = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
     let shown = path.display().to_string();
@@ -76,7 +99,15 @@ pub fn play(state: State) {
         State::Error => ERROR.get_or_init(|| wav(&[(440.0, 0.0, 0.2), (330.0, 0.16, 0.32)])),
         _ => return,
     };
+    #[cfg(target_os = "macos")]
+    {
+        let data = objc2_foundation::NSData::with_bytes(buf);
+        if let Some(sound) = objc2_app_kit::NSSound::initWithData(<objc2_app_kit::NSSound as objc2::AllocAnyThread>::alloc(), &data) {
+            start(sound);
+        }
+    }
     // The buffers are static, so they outlive the asynchronous playback SND_MEMORY reads from.
+    #[cfg(windows)]
     unsafe { PlaySoundW(buf.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
 }
 

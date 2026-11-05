@@ -2,6 +2,7 @@
 //! nothing can be added in one language and forgotten in the other.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 
 const LANG_VIETNAMESE: u16 = 0x2A;
@@ -14,7 +15,23 @@ pub fn vi() -> bool {
 
 /// `choice`: "vi", "en", or anything else to follow Windows.
 pub fn apply(choice: &str) {
-    VIETNAMESE.store(resolve(choice, unsafe { GetUserDefaultUILanguage() }), Ordering::Relaxed);
+    VIETNAMESE.store(resolve(choice, system_language()), Ordering::Relaxed);
+}
+
+#[cfg(windows)]
+fn system_language() -> u16 {
+    unsafe { GetUserDefaultUILanguage() }
+}
+
+#[cfg(target_os = "macos")]
+fn system_language() -> u16 {
+    let first = objc2_foundation::NSLocale::preferredLanguages().iter().next().map(|l| l.to_string());
+    if first.is_some_and(|l| l.starts_with("vi")) { LANG_VIETNAMESE } else { 0 }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn system_language() -> u16 {
+    if std::env::var("LANG").is_ok_and(|l| l.starts_with("vi")) { LANG_VIETNAMESE } else { 0 }
 }
 
 fn resolve(choice: &str, windows_language: u16) -> bool {

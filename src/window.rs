@@ -5,7 +5,7 @@
 
 use crate::i18n::t;
 use crate::anim::{self, CharAnim, Player};
-use crate::config::{self, Config, MIN_ZOOM, SIZE_FACTORS};
+use crate::config::{Config, MIN_ZOOM, SIZE_FACTORS};
 use crate::focus;
 use crate::fx;
 use crate::theme;
@@ -16,7 +16,7 @@ use crate::picker;
 use crate::render::{self, Bubble, Hit, HitRect, TextDrawer, View, CHAR_SIZE, MOTION_MARGIN_SIDE, MOTION_MARGIN_TOP, WIN_H, WIN_W};
 use crate::server::{self, now_ms, Shared};
 use crate::sound;
-use crate::store::{self, name_of, status_of, detail_of, Session, State};
+use crate::store::{self, name_of, status_of, Session, State};
 use crate::usage;
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -39,6 +39,8 @@ use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, Get
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT};
 use windows_sys::Win32::UI::Shell::*;
+use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_TRANSITIONS_FORCEDISABLED};
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_WAKE: u32 = WM_APP + 1;
@@ -63,6 +65,7 @@ const TIMER_HOVER: usize = 5;
 const TIMER_TRIM: usize = 6;
 const TIMER_SCAN: usize = 7;
 const TIMER_ZOOM: usize = 8;
+const MAX_WINDOWS_WALKED: usize = 512;
 const TRIM_DELAY_MS: u32 = 3_000;
 /// Once the wheel rests this long, the size is saved and sharper frames prepared if they would help.
 const ZOOM_SETTLE_MS: u32 = 500;
@@ -180,14 +183,6 @@ fn message_box(text: &str, flags: u32) -> i32 {
     unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), w!("Claude Buddy"), flags | MB_SETFOREGROUND) }
 }
 
-pub fn hooks_cli(install: bool) -> i32 {
-    let port = Config::load().port;
-    match hooks_config::apply(install, &exe_path(), port) {
-        Ok(_) => 0,
-        Err(_) => 1,
-    }
-}
-
 fn autostart_enabled() -> bool {
     unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) == ERROR_SUCCESS }
 }
@@ -201,6 +196,39 @@ fn set_autostart(on: bool) {
             RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
         }
     }
+}
+
+/// Windows can leave a window marked topmost with ordinary windows above it, so the mark can't be trusted.
+fn normal_window_above(hwnd: HWND) -> bool {
+    unsafe {
+        let mut w = GetWindow(hwnd, GW_HWNDPREV);
+        for _ in 0..MAX_WINDOWS_WALKED {
+            if w.is_null() {
+                return false;
+            }
+            if IsWindowVisible(w) != 0 && GetWindowLongPtrW(w, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0 {
+                return true;
+            }
+            w = GetWindow(w, GW_HWNDPREV);
+        }
+        false
+    }
+}
+
+/// The order of windows changed: put right at once, before the screen shows it if at all possible.
+unsafe extern "system" fn windows_reordered(_hook: HWINEVENTHOOK, event: u32, window: HWND, _object: i32, _child: i32, _thread: u32, _time: u32) {
+    // Reordering inside a program's own window says nothing about the buddy.
+    if event == EVENT_OBJECT_REORDER && window != GetDesktopWindow() {
+        return;
+    }
+    with_app(|a| {
+        // Opening some programs, like Photos, costs it its place without anything to show for it until
+        // the next window comes up over it. Claimed again here, it never gets that far.
+        if event == EVENT_SYSTEM_FOREGROUND && !a.behind_picker {
+            SetWindowPos(a.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        a.sync_z_order();
+    });
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -425,9 +453,7 @@ struct FullRestore {
 
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
 
-pub fn user_root() -> PathBuf {
-    config::dir().join("characters")
-}
+pub use crate::config::{user_root, Setting, SettingsView};
 
 struct Drag {
     start_cursor: POINT,
@@ -1446,7 +1472,7 @@ impl App {
                 }
             }
             if self.config.toasts {
-                let (title, body) = toast_text(&t.session, t.to);
+                let (title, body) = crate::store::toast_text(&t.session, t.to);
                 let icon = make_icon(t.to, BALLOON_ICON_SIZE);
                 self.balloon_with_icon(&title, &body, icon);
             }
@@ -1560,6 +1586,8 @@ impl App {
                 self.behind_picker = in_use;
                 let after = if in_use { picker } else { HWND_TOPMOST };
                 SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            } else if !in_use && normal_window_above(self.hwnd) {
+                SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         }
     }
@@ -2054,21 +2082,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 }
 
 /// Says what happened and where, in words, for a Windows notification.
-fn toast_text(s: &Session, to: State) -> (String, String) {
-    let title = match to {
-        State::Waiting => t("Claude cần bạn", "Claude needs you"),
-        State::Done => t("Claude đã xong", "Claude is done"),
-        State::Error => t("Claude gặp lỗi", "Claude hit an error"),
-        _ => "Claude Buddy",
-    };
-    let name = name_of(s);
-    let body = match detail_of(s) {
-        Some(d) if !d.is_empty() => format!("{name}\n{d}"),
-        _ => name,
-    };
-    (title.to_string(), body)
-}
-
 /// The logo at tray size, with a dot saying what the sessions are doing. Lets you check on Claude with
 /// a glance at the taskbar, with nothing covering your work.
 fn make_tray_icon(state: State) -> HICON {
@@ -2284,6 +2297,15 @@ pub fn run() {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         register_skill_keys(hwnd, false);
         SetTimer(hwnd, TIMER_HOUSEKEEPING, HOUSEKEEPING_MS, None);
+        // Alt+Tab and the taskbar's previews hide every other window for a moment, which would make it blink.
+        let excluded: i32 = 1;
+        DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK as u32, &excluded as *const i32 as *const _, 4);
+        // Nor should it fade or animate when the windows around it change.
+        DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED as u32, &excluded as *const i32 as *const _, 4);
+        // These call back on this thread, and cost nothing while no window moves.
+        for event in [EVENT_SYSTEM_FOREGROUND, EVENT_OBJECT_REORDER] {
+            SetWinEventHook(event, event, std::ptr::null_mut(), Some(windows_reordered), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        }
         // Nobody sees animation on a locked or dark screen, so it stops completely until they can.
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         RegisterPowerSettingNotification(hwnd as *mut _, &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
@@ -2309,33 +2331,6 @@ pub fn run() {
 }
 
 // ---- what the picker needs from the app ----
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Setting {
-    Hooks,
-    Sound,
-    Toasts,
-    Autostart,
-    AutoHide,
-    Translucent,
-    Size(u8),
-    /// 0 follows Windows, 1 Vietnamese, 2 English.
-    Language(u8),
-    ResetPosition,
-    Folder,
-}
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct SettingsView {
-    pub hooks: bool,
-    pub sound: bool,
-    pub toasts: bool,
-    pub autostart: bool,
-    pub auto_hide: bool,
-    pub translucent: bool,
-    pub size: u8,
-    pub language: u8,
-}
 
 /// Keeps the buddy under the main window while you use it, and on top of everything otherwise.
 pub fn sync_buddy_with_picker() {
@@ -2451,7 +2446,7 @@ mod tests {
         let mut st = Store::default();
         let e = Event { session_id: "a".into(), event: "Notification".into(), cwd: Some("C:\\work\\shop-api".into()), message: Some("Cần quyền chạy lệnh".into()), ..Default::default() };
         st.apply(&e, 0).unwrap();
-        let (title, body) = toast_text(st.get("a").unwrap(), State::Waiting);
+        let (title, body) = crate::store::toast_text(st.get("a").unwrap(), State::Waiting);
         assert_eq!(title, "Claude cần bạn");
         assert_eq!(body, "shop-api\nCần quyền chạy lệnh");
         assert!(!title.chars().any(|c| c as u32 > 0x2000), "no emoji in titles");

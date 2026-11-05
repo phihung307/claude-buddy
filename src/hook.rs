@@ -2,6 +2,7 @@
 //! Forwards stdin to the running app, prints nothing and always exits 0, so Claude Code never shows
 //! a hook error and nothing reaches its context, even when the app isn't running.
 
+#[cfg(windows)]
 use crate::focus;
 use crate::server::MAX_HOOK_BODY;
 use std::io::{Read, Write};
@@ -9,6 +10,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 /// The Claude process that started this hook. Shell wrappers may sit in between, so ancestors are walked.
+#[cfg(windows)]
 fn claude_pid() -> Option<u32> {
     let procs = focus::processes();
     let mut p = procs.get(&std::process::id())?.parent;
@@ -19,6 +21,40 @@ fn claude_pid() -> Option<u32> {
             return Some(p);
         }
         p = info.parent;
+    }
+    Some(direct_parent)
+}
+
+/// `ps` lines of pid, parent and command. The command may hold spaces, and macOS gives its whole path.
+#[cfg(not(windows))]
+fn parse_ps(text: &str) -> std::collections::HashMap<u32, (u32, &str)> {
+    text.lines()
+        .filter_map(|l| {
+            let (pid, rest) = l.trim_start().split_once(char::is_whitespace)?;
+            let (parent, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some((pid.parse().ok()?, (parent.parse().ok()?, command.trim().rsplit('/').next()?)))
+        })
+        .collect()
+}
+
+/// Every process: its parent and its command's name.
+#[cfg(not(windows))]
+pub fn process_table() -> std::collections::HashMap<u32, (u32, String)> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output() else { return Default::default() };
+    parse_ps(&String::from_utf8_lossy(&out.stdout)).into_iter().map(|(pid, (parent, name))| (pid, (parent, name.to_string()))).collect()
+}
+
+#[cfg(not(windows))]
+fn claude_pid() -> Option<u32> {
+    let procs = process_table();
+    let direct_parent = std::os::unix::process::parent_id();
+    let mut p = direct_parent;
+    for _ in 0..8 {
+        let (parent, name) = procs.get(&p)?;
+        if matches!(name.as_str(), "claude" | "node" | "bun") {
+            return Some(p);
+        }
+        p = *parent;
     }
     Some(direct_parent)
 }
@@ -57,4 +93,22 @@ pub fn run(port: u16) {
     }
     let mut sink = [0u8; 256];
     while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::parse_ps;
+
+    #[test]
+    fn reads_ps_lines_with_paths_and_spaces() {
+        let procs = parse_ps("    1     0 launchd
+  512     1 /Applications/My Tools/claude
+  900   512 /usr/local/bin/node
+not a process
+");
+        assert_eq!(procs.get(&1), Some(&(0, "launchd")));
+        assert_eq!(procs.get(&512), Some(&(1, "claude")));
+        assert_eq!(procs.get(&900), Some(&(512, "node")));
+        assert_eq!(procs.len(), 3);
+    }
 }

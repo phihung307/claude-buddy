@@ -1,13 +1,19 @@
 //! Follows the Windows light/dark setting and accent colour, with the Windows 11 colour ramp.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(windows)]
 use windows_sys::core::{s, w, PCWSTR};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HWND};
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_CAPTION_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
+#[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+#[cfg(windows)]
 use windows_sys::Win32::UI::Controls::MARGINS;
+#[cfg(windows)]
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
 /// Windows' default accent, for when the setting can't be read.
@@ -21,6 +27,7 @@ static SYSTEM_TRANSPARENCY: AtomicBool = AtomicBool::new(true);
 
 /// What sits behind a window's page background.
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Backdrop {
     Solid,
     /// Windows 11: the page is left empty and Windows fills it with Mica.
@@ -44,6 +51,7 @@ pub const CARD_ALPHA: f32 = 0.72;
 pub const FLOATING_ALPHA: f32 = 0.94;
 pub const BLUR_TINT_ALPHA: f32 = 0.72;
 
+#[cfg(windows)]
 #[repr(C)]
 struct AccentPolicy {
     state: i32,
@@ -52,6 +60,7 @@ struct AccentPolicy {
     animation: i32,
 }
 
+#[cfg(windows)]
 #[repr(C)]
 struct CompositionData {
     attribute: i32,
@@ -61,6 +70,7 @@ struct CompositionData {
 
 /// Windows 10's blur has no public API; this long-standing one is looked up so that a Windows without
 /// it just stays solid.
+#[cfg(windows)]
 fn set_blur(hwnd: HWND, on: bool) -> bool {
     const WCA_ACCENT_POLICY: i32 = 19;
     const ACCENT_DISABLED: i32 = 0;
@@ -149,10 +159,12 @@ pub fn pal() -> Pal {
 }
 
 /// The registry stores it as 0xAABBGGRR.
+#[cfg(any(windows, test))]
 fn accent_from_registry(abgr: u32) -> u32 {
     (abgr & 0xff) << 16 | (abgr & 0xff00) | (abgr >> 16 & 0xff)
 }
 
+#[cfg(windows)]
 fn read_dword(key: PCWSTR, value: PCWSTR) -> Option<u32> {
     let (mut data, mut size) = (0u32, 4u32);
     let r = unsafe { RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_DWORD, std::ptr::null_mut(), &mut data as *mut u32 as *mut _, &mut size) };
@@ -160,6 +172,7 @@ fn read_dword(key: PCWSTR, value: PCWSTR) -> Option<u32> {
 }
 
 /// Reads the current Windows settings; call at start and whenever they change.
+#[cfg(windows)]
 pub fn reload() {
     let light = read_dword(w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("AppsUseLightTheme"));
     // CLAUDE_BUDDY_RS_THEME forces a theme for checking both without changing the Windows setting.
@@ -173,6 +186,7 @@ pub fn reload() {
 
 /// Sets up the title bar and what is behind the page, and says what it got. Windows 10 ignores the
 /// attributes it doesn't know, which is what tells the two apart.
+#[cfg(windows)]
 pub fn apply_backdrop(hwnd: HWND) -> Backdrop {
     let p = pal();
     let dark: i32 = DARK.load(Ordering::Relaxed) as i32;
@@ -198,6 +212,23 @@ pub fn apply_backdrop(hwnd: HWND) -> Backdrop {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, &caption as *const u32 as *const _, 4);
         got
     }
+}
+
+/// Light or dark from the system; pages are solid here.
+#[cfg(not(windows))]
+pub fn reload() {
+    #[cfg(target_os = "macos")]
+    let system_dark = objc2_foundation::NSUserDefaults::standardUserDefaults().stringForKey(&objc2_foundation::NSString::from_str("AppleInterfaceStyle")).is_some_and(|s| s.to_string() == "Dark");
+    #[cfg(not(target_os = "macos"))]
+    let system_dark = false;
+    let forced = std::env::var("CLAUDE_BUDDY_RS_THEME").ok();
+    DARK.store(forced.as_deref().map_or(system_dark, |t| t == "dark"), Ordering::Relaxed);
+    SYSTEM_TRANSPARENCY.store(false, Ordering::Relaxed);
+}
+
+#[cfg(not(windows))]
+pub fn apply_backdrop<T>(_window: T) -> Backdrop {
+    Backdrop::Solid
 }
 
 #[cfg(test)]

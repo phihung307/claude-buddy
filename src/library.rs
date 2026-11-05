@@ -61,6 +61,9 @@ pub struct Character {
     pub states: [StateMedia; 5],
     /// Custom sounds for done and waiting.
     pub sounds: [Option<PathBuf>; 2],
+    /// `"autoSkills": true` in character.json: its skills go off by themselves as the sessions'
+    /// state changes, unless the user turned that off.
+    pub auto_skills: bool,
 }
 
 impl Character {
@@ -200,6 +203,7 @@ pub fn normalize(raw: &Value, dir: &Path) -> Result<Character, String> {
         source: Source::Folder(dir.to_path_buf()),
         states,
         sounds: [sound("done"), sound("waiting")],
+        auto_skills: raw.get("autoSkills").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -226,6 +230,7 @@ fn vector_character(i: usize) -> Character {
         source: Source::Vector(i),
         states: std::array::from_fn(media),
         sounds: [None, None],
+        auto_skills: false,
     }
 }
 

@@ -19,6 +19,8 @@ mod focus;
 #[path = "focus_mac.rs"]
 mod focus;
 #[cfg(windows)]
+mod fx;
+#[cfg(windows)]
 #[path = "host_win.rs"]
 mod host;
 #[cfg(target_os = "macos")]

@@ -7,6 +7,10 @@ use std::path::PathBuf;
 /// Not the original Claude Buddy's 47321, so both can run side by side.
 pub const DEFAULT_PORT: u16 = 47329;
 const OLD_CHARACTERS: [&str; 3] = ["mochi", "meo-muop", "gau-bo"];
+/// What the small, normal and large sizes scale the character by.
+pub const SIZE_FACTORS: [f32; 3] = [0.75, 1.0, 1.25];
+/// Wheel zoom never goes below this; the top is wherever the character fills the screen.
+pub const MIN_ZOOM: f32 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -21,6 +25,8 @@ pub struct Config {
     pub lift: f32,
     /// Character size: 0 small, 1 normal, 2 large.
     pub size: u8,
+    /// What the character is actually scaled by: one of the sizes above, or wherever the wheel left it.
+    pub zoom: f32,
     /// Get out of the way of full-screen apps and presentations.
     pub auto_hide: bool,
     /// See-through window backgrounds, where Windows offers them.
@@ -29,11 +35,31 @@ pub struct Config {
     pub asked_hooks: bool,
     /// "vi", "en", or "auto" to follow Windows.
     pub language: String,
+    /// Skills going off by themselves as the sessions' state changes. None follows the character.
+    pub auto_skills: Option<bool>,
+    /// How long the sessions work before shadow clones come out to help.
+    pub auto_clone_secs: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { port: DEFAULT_PORT, position: None, muted: false, toasts: true, character: "mochi".into(), shift: 0.0, lift: 0.0, size: 1, auto_hide: true, translucent: true, asked_hooks: false, language: "auto".into() }
+        Config {
+            port: DEFAULT_PORT,
+            position: None,
+            muted: false,
+            toasts: true,
+            character: "mochi".into(),
+            shift: 0.0,
+            lift: 0.0,
+            size: 1,
+            zoom: 1.0,
+            auto_hide: true,
+            translucent: true,
+            asked_hooks: false,
+            language: "auto".into(),
+            auto_skills: None,
+            auto_clone_secs: 20,
+        }
     }
 }
 
@@ -92,6 +118,7 @@ fn parse(text: &str) -> Config {
     let Ok(j) = serde_json::from_str::<Value>(text) else { return d };
     let flag = |k: &str, def| j.get(k).and_then(Value::as_bool).unwrap_or(def);
     let int = |k: &str| j.get(k).and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok());
+    let size = j.get("size").and_then(Value::as_u64).map_or(d.size, |v| v.min(2) as u8);
     Config {
         port: j.get("port").and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0).unwrap_or(d.port),
         position: int("x").zip(int("y")),
@@ -105,11 +132,15 @@ fn parse(text: &str) -> Config {
         },
         shift: j.get("shift").and_then(Value::as_f64).unwrap_or(0.0) as f32,
         lift: j.get("lift").and_then(Value::as_f64).unwrap_or(0.0) as f32,
-        size: j.get("size").and_then(Value::as_u64).map_or(d.size, |v| v.min(2) as u8),
+        size,
+        // Files from before wheel zoom only have the size.
+        zoom: j.get("zoom").and_then(Value::as_f64).map(|z| z as f32).filter(|z| z.is_finite() && *z >= MIN_ZOOM).unwrap_or(SIZE_FACTORS[size as usize]),
         auto_hide: flag("autoHide", d.auto_hide),
         translucent: flag("translucent", d.translucent),
         asked_hooks: flag("askedHooks", d.asked_hooks),
         language: j.get("language").and_then(Value::as_str).unwrap_or(&d.language).to_string(),
+        auto_skills: j.get("autoSkills").and_then(Value::as_bool),
+        auto_clone_secs: j.get("autoCloneSeconds").and_then(Value::as_u64).map_or(d.auto_clone_secs, |s| s.clamp(1, 3600) as u32),
     }
 }
 
@@ -122,11 +153,16 @@ fn serialize(c: &Config) -> String {
         "shift": c.shift,
         "lift": c.lift,
         "size": c.size,
+        "zoom": c.zoom,
         "autoHide": c.auto_hide,
         "translucent": c.translucent,
         "askedHooks": c.asked_hooks,
         "language": c.language,
+        "autoCloneSeconds": c.auto_clone_secs,
     });
+    if let Some(on) = c.auto_skills {
+        j["autoSkills"] = json!(on);
+    }
     if let Some((x, y)) = c.position {
         j["x"] = json!(x);
         j["y"] = json!(y);
@@ -156,8 +192,17 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let c = Config { port: 5000, position: Some((-20, 300)), muted: true, toasts: false, character: "bear".into(), shift: -12.0, lift: 40.0, size: 2, auto_hide: false, translucent: false, asked_hooks: true, language: "en".into() };
+        let c = Config { port: 5000, position: Some((-20, 300)), muted: true, toasts: false, character: "bear".into(), shift: -12.0, lift: 40.0, size: 2, zoom: 3.5, auto_hide: false, translucent: false, asked_hooks: true, language: "en".into(), auto_skills: Some(false), auto_clone_secs: 45 };
         assert_eq!(parse(&serialize(&c)), c);
+        let c = Config { auto_skills: None, ..c };
+        assert_eq!(parse(&serialize(&c)), c);
+    }
+
+    #[test]
+    fn zoom_falls_back_to_the_size() {
+        assert_eq!(parse(r#"{"size":2}"#).zoom, 1.25);
+        assert_eq!(parse(r#"{"size":0,"zoom":0.1}"#).zoom, 0.75);
+        assert_eq!(parse(r#"{"size":0,"zoom":4}"#).zoom, 4.0);
     }
 
     #[test]

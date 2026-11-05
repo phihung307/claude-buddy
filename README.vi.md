@@ -78,6 +78,8 @@ Lệnh này xoá app, mục mở khi đăng nhập và hook. Cài đặt, số l
 | Bấm bong bóng | Mở cửa sổ của phiên cần chú ý nhất |
 | Bấm một dòng phiên | Mở cửa sổ terminal/IDE của phiên đó |
 | Kéo nhân vật | Tới bất kỳ đâu trên màn hình; vị trí được ghi nhớ |
+| Lăn chuột trên nhân vật | Phóng to hoặc thu nhỏ, tối đa bằng màn hình |
+| Trỏ vào nhân vật rồi bấm Ctrl+Q / Ctrl+W / Ctrl+R | Skill: dịch chuyển sang góc khác / phân thân ở các góc / toàn màn hình và quay lại. Ở nơi khác thì thêm Alt (Ctrl+Alt+Q…). Sau mỗi skill, phím Ctrl vẫn thuộc về buddy thêm 4 giây, nên bấm tiếp không cần trỏ lại |
 | Chuột phải nhân vật hoặc icon khay | Menu nhanh |
 | Bấm icon khay (Windows) | Mở cửa sổ chính (Nhân vật, Mức dùng, Cài đặt) |
 | Bấm icon thanh menu (macOS) | Menu nhanh, mở cửa sổ chính bằng **Quản lý nhân vật**, **Xem mức dùng** và **Cài đặt** |
@@ -144,10 +146,24 @@ thái):
 
 Âm thanh riêng: `sounds/done` và `sounds/waiting` dạng `.wav` hoặc `.mp3`. Clip rất dài bị cắt bớt (giới hạn 50 MB mỗi file).
 
+Ảnh lớn hơn cỡ thường (ví dụ 1024 pixel) vẫn nét khi phóng to nhân vật hoặc toàn màn hình.
+
+Thêm `"autoSkills": true` vào `character.json` thì nhân vật tự dùng skill:
+
+| Khi | Skill |
+|---|---|
+| Các phiên làm việc được 20 giây | Phân thân xuất hiện, tan khi hết việc |
+| Một phiên cần bạn | Dịch chuyển tới góc gần con trỏ chuột nhất |
+| Các phiên xong việc | Dịch chuyển sang góc khác |
+
+Không tự dùng khi đang toàn màn hình, khi khoá màn hình, hoặc khi bạn đang kéo nhân vật. Bật hoặc tắt cho nhân vật bất kỳ
+trong menu chuột phải (**Tự dùng skill theo phiên**).
+
 ## Cấu hình
 
 `config.json` trong `%APPDATA%\claude-buddy-rs` trên Windows hoặc `~/Library/Application Support/claude-buddy-rs` trên
 macOS, mục `port` (mặc định 47329). Đổi cổng thì cần kết nối lại Claude Code.
+Mục `autoCloneSeconds` (mặc định 20) là số giây các phiên làm việc trước khi phân thân xuất hiện.
 
 ## API cục bộ
 

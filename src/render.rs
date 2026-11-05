@@ -8,7 +8,7 @@ use crate::motion::{Motion, Xform};
 use crate::theme::{self, pal};
 use std::f32::consts::{PI, TAU};
 use tiny_skia::{
-    BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Paint, Path, PathBuilder, PixmapMut, PixmapPaint, PixmapRef, Point, Rect, SpreadMode, Stroke, Transform,
+    BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapPaint, PixmapRef, Point, Rect, SpreadMode, Stroke, Transform,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{RECT, SIZE};
@@ -428,9 +428,15 @@ pub fn char_rect(w: u32, h: u32, scale: f32) -> (u32, u32, u32, u32) {
 }
 
 /// Logical size of the area a media character needs, motion included.
+#[cfg(test)]
 pub fn media_region(stage_w: u32, stage_h: u32, scale: f32) -> (f32, f32) {
-    let w = (stage_w as f32 / scale + MOTION_MARGIN_SIDE * 2.0).min(WIN_W);
-    (w, stage_h as f32 / scale + MOTION_MARGIN_TOP)
+    media_region_in(stage_w as f32, stage_h as f32, scale, WIN_W)
+}
+
+/// Same, in a window `max_w` logical pixels wide; the stage size may be fractional once zoomed.
+pub fn media_region_in(stage_w: f32, stage_h: f32, scale: f32, max_w: f32) -> (f32, f32) {
+    let w = (stage_w / scale + MOTION_MARGIN_SIDE * 2.0).min(max_w);
+    (w, stage_h / scale + MOTION_MARGIN_TOP)
 }
 
 /// Moves a pixel rectangle and cuts it to the window.
@@ -497,6 +503,37 @@ pub fn paint_change(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], f
     blit(buf, w, h, pixels, fw, left, top, rect)
 }
 
+/// `paint_change` for frames shown `zoom` times their size: only the part of the window over what
+/// changed is drawn again, through a small scratch picture, so a big character that blinks costs a
+/// blink and not a whole screen.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_change_zoomed(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw: u32, fh: u32, rect: (u32, u32, u32, u32), off: (i32, i32), zoom: f32) -> (u32, u32, u32, u32) {
+    let Some(src) = PixmapRef::from_bytes(pixels, fw, fh) else { return (0, 0, 0, 0) };
+    let feet_x = w as f32 / 2.0 + off.0 as f32;
+    let feet_y = h.saturating_sub((CHAR_BOTTOM_GAP * scale) as u32) as f32 + off.1 as f32;
+    let (left, top) = (feet_x - fw as f32 * zoom / 2.0, feet_y - fh as f32 * zoom);
+    // Filtering reaches a couple of source pixels past the change, so the patch does too.
+    let pad = 2.0 * zoom.max(1.0);
+    let x0 = (left + rect.0 as f32 * zoom - pad).floor().clamp(0.0, w as f32) as u32;
+    let y0 = (top + rect.1 as f32 * zoom - pad).floor().clamp(0.0, h as f32) as u32;
+    let x1 = (left + (rect.0 + rect.2) as f32 * zoom + pad).ceil().clamp(0.0, w as f32) as u32;
+    let y1 = (top + (rect.1 + rect.3) as f32 * zoom + pad).ceil().clamp(0.0, h as f32) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return (0, 0, 0, 0);
+    }
+    let Some(mut patch) = Pixmap::new(x1 - x0, y1 - y0) else { return (0, 0, 0, 0) };
+    // Bicubic looked no sharper on a full-screen character and cost five times the CPU.
+    let quality = FilterQuality::Bilinear;
+    let tf = Transform::from_translate(feet_x - x0 as f32, feet_y - y0 as f32).pre_scale(zoom, zoom).pre_translate(-(fw as f32) / 2.0, -(fh as f32));
+    patch.draw_pixmap(0, 0, src, &PixmapPaint { opacity: 1.0, blend_mode: BlendMode::SourceOver, quality }, tf, None);
+    let row = ((x1 - x0) * 4) as usize;
+    for (i, y) in (y0..y1).enumerate() {
+        let dst = ((y * w + x0) * 4) as usize;
+        buf[dst..dst + row].copy_from_slice(&patch.data()[i * row..(i + 1) * row]);
+    }
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
 /// Redraws a media character into the window; `buf` is the whole window. Returns the dirty rectangle.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -505,15 +542,26 @@ pub fn paint_media(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw
 }
 
 /// `room`: keep the margins motion needs. Characters that never move on their own stage don't.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn paint_stage(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw: u32, fh: u32, xf: Xform, badge: Option<State>, t: f32, off: (i32, i32), room: bool) -> (u32, u32, u32, u32) {
-    let (rw, rh) = if room { media_region(fw, fh, scale) } else { (fw as f32 / scale, fh as f32 / scale) };
+    paint_stage_zoomed(buf, w, h, scale, pixels, fw, fh, xf, badge, t, off, room, 1.0)
+}
+
+/// `zoom`: how much bigger than its prepared frames the character is shown. Past the source's own
+/// resolution, preparing bigger frames would only store the same blur in more bytes, so the rest is
+/// stretched while drawing.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_stage_zoomed(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw: u32, fh: u32, xf: Xform, badge: Option<State>, t: f32, off: (i32, i32), room: bool, zoom: f32) -> (u32, u32, u32, u32) {
+    let (sw, sh) = (fw as f32 * zoom, fh as f32 * zoom);
+    let (rw, rh) = if room { media_region_in(sw, sh, scale, w as f32 / scale) } else { (sw / scale, sh / scale) };
     // Reaches the window's bottom edge: leaning dips a corner below the feet, into the gap under them.
     let bottom = h.saturating_sub((CHAR_BOTTOM_GAP * scale) as u32);
     let (rw_px, rh_px) = (((rw * scale).ceil() as u32).min(w), ((rh * scale).ceil() as u32).min(bottom));
     let region = moved_rect(((w - rw_px) / 2, bottom - rh_px, rw_px, rh_px + (h - bottom)), off, w, h);
     clear_rect(buf, w, region);
-    if xf == Motion::None.at(0.0) && badge.is_none() {
+    let zoomed = (zoom - 1.0).abs() > 0.001;
+    if xf == Motion::None.at(0.0) && badge.is_none() && !zoomed {
         let (left, top) = frame_origin(w, h, scale, fw, fh, off);
         blit(buf, w, h, pixels, fw, left, top, (0, 0, fw, fh));
         return region;
@@ -521,9 +569,9 @@ pub fn paint_stage(buf: &mut [u8], w: u32, h: u32, scale: f32, pixels: &[u8], fw
     let feet_x = w as f32 / 2.0 + off.0 as f32;
     let feet_y = bottom as f32 + off.1 as f32;
     let Some(mut pm) = PixmapMut::from_bytes(buf, w, h) else { return region };
-    draw_frame(&mut pm, pixels, fw, fh, feet_x, feet_y, scale, xf);
+    draw_frame(&mut pm, pixels, fw, fh, feet_x, feet_y, scale, Xform { sx: xf.sx * zoom, sy: xf.sy * zoom, ..xf });
     if let Some(state) = badge {
-        draw_badge_at(&mut pm, feet_x + fw as f32 / 2.0 - 18.0 * scale, feet_y - fh as f32 + 18.0 * scale, scale, state, t);
+        draw_badge_at(&mut pm, feet_x + sw / 2.0 - 18.0 * scale, feet_y - sh + 18.0 * scale, scale, state, t);
     }
     region
 }
@@ -547,6 +595,15 @@ pub fn paint_character(buf: &mut [u8], w: u32, h: u32, scale: f32, kind: usize, 
     let base = Transform::from_translate((x as i32 + off.0) as f32, (y as i32 + off.1) as f32).pre_scale(k, k);
     draw_character(&mut pm, base, kind, state, t);
     dirty
+}
+
+/// The character alone, standing at `feet`: for a copy of it in a window of its own.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_character_at(buf: &mut [u8], w: u32, h: u32, scale: f32, kind: usize, state: State, t: f32, feet: (f32, f32)) {
+    let Some(mut pm) = PixmapMut::from_bytes(buf, w, h) else { return };
+    let size = CHAR_SIZE * scale;
+    let base = Transform::from_translate(feet.0 - size / 2.0, feet.1 - size).pre_scale(size / 200.0, size / 200.0);
+    draw_character(&mut pm, base, kind, state, t);
 }
 
 // ---- text ----
@@ -896,16 +953,32 @@ pub fn paint_ui(buf: &mut [u8], w: u32, h: u32, scale: f32, text: &TextDrawer, v
     let p = pal();
     let ui = Ui { w, h, scale, text };
     let mut hits = Vec::new();
+    // The window grows with a zoomed character, so its logical size comes from the buffer.
+    let (win_w, win_h) = (w as f32 / scale, h as f32 / scale);
     let (char_w, char_h) = view.char_region;
     let (off_x, off_y) = view.char_off;
-    let char_bottom = WIN_H - CHAR_BOTTOM_GAP + off_y;
+    let char_bottom = win_h - CHAR_BOTTOM_GAP + off_y;
     let char_top = char_bottom - char_h;
     // Raised past the middle of its travel, there is more room under the character than over it, so
     // the bubble and panel go there instead.
-    let travel = (WIN_H - CHAR_BOTTOM_GAP - char_h).max(0.0);
+    let travel = (win_h - CHAR_BOTTOM_GAP - char_h).max(0.0);
     let below = -off_y > travel + off_y;
     let mut top = char_top - 2.0;
     let mut down = char_bottom + CHAR_BOTTOM_GAP + 2.0;
+    // A character as tall as the screen leaves no room over it. With room at its side, the bubble and
+    // panel go there, from head height down; otherwise the bubble sits on it.
+    let char_left = (win_w - char_w) / 2.0 + off_x;
+    let char_right = char_left + char_w;
+    let beside = |cw: f32| {
+        if char_right + 12.0 + cw <= win_w - 4.0 {
+            Some(char_right + 12.0)
+        } else if char_left - 12.0 - cw >= 4.0 {
+            Some(char_left - 12.0 - cw)
+        } else {
+            None
+        }
+    };
+    let mut side_top = char_top.max(0.0) + 8.0;
 
     // Bubble: one line per active session, plus the top one's detail.
     let active: Vec<&Session> = view
@@ -935,11 +1008,17 @@ pub fn paint_ui(buf: &mut [u8], w: u32, h: u32, scale: f32, text: &TextDrawer, v
         }
         let bw = (content + 12.0).clamp(150.0, MAX_W);
         // Follows the character sideways as far as the window allows; the tail keeps pointing at it.
-        let room = ((WIN_W - 16.0 - bw) / 2.0).max(0.0);
-        let bx = (WIN_W - bw) / 2.0 + off_x.clamp(-room, room);
-        let tail_x = (WIN_W / 2.0 + off_x).clamp(bx + 16.0, bx + bw - 16.0);
-        let by = if below { down + 7.0 } else { top - 7.0 - height };
-        ui.card(buf, bx, by, bw, height, p.stroke, Some((tail_x, below)));
+        let room = ((win_w - 16.0 - bw) / 2.0).max(0.0);
+        let bx = (win_w - bw) / 2.0 + off_x.clamp(-room, room);
+        let tail_x = (win_w / 2.0 + off_x).clamp(bx + 16.0, bx + bw - 16.0);
+        let side = if !below && top - 7.0 - height < 2.0 { beside(bw) } else { None };
+        let by = match side {
+            Some(_) => side_top,
+            None if below => down + 7.0,
+            None => (top - 7.0 - height).max(2.0),
+        };
+        let bx = side.unwrap_or(bx);
+        ui.card(buf, bx, by, bw, height, p.stroke, side.is_none().then_some((tail_x, below)));
         let mut y = by + 6.0;
         for s in active.iter().take(shown) {
             // Name and status shrink separately, so a long session name never hides the status.
@@ -959,8 +1038,10 @@ pub fn paint_ui(buf: &mut [u8], w: u32, h: u32, scale: f32, text: &TextDrawer, v
         if let Some(d) = &detail {
             ui.label(buf, bx + 12.0, y, bw - 24.0, 17.0, d, Font::Small, p.muted);
         }
-        hits.push(ui.rect(bx, if below { by - 7.0 } else { by }, bw, height + 7.0, Hit::Bubble));
-        if below {
+        hits.push(ui.rect(bx, if below && side.is_none() { by - 7.0 } else { by }, bw, height + 7.0, Hit::Bubble));
+        if side.is_some() {
+            side_top = by + height + 8.0;
+        } else if below {
             down = by + height;
         } else {
             top = by;
@@ -970,15 +1051,26 @@ pub fn paint_ui(buf: &mut [u8], w: u32, h: u32, scale: f32, text: &TextDrawer, v
     if view.panel_open {
         // As many rows as fit above whatever the character and bubble take up.
         let usage_h = if view.usage.is_some() { USAGE_LINE_H } else { 0.0 };
-        let space = if below { WIN_H - down } else { top };
+        const PW: f32 = 284.0;
+        // Beside the character when fewer than two rows would fit over it.
+        let side = if !below && top - 6.0 - 38.0 - 18.0 - usage_h < 2.0 * ROW_H { beside(PW) } else { None };
+        let space = match side {
+            Some(_) => win_h - side_top,
+            None if below => win_h - down,
+            None => top,
+        };
         let fits = ((space - 6.0 - 38.0 - 18.0 - usage_h) / ROW_H).floor().max(1.0) as usize;
         let shown = view.sessions.len().min(MAX_PANEL_ROWS).min(fits);
         let extra = view.sessions.len() - shown;
         let rows = shown.max(1) as f32 * ROW_H;
         let footer = if extra > 0 || view.note.is_some() { 18.0 } else { 0.0 };
         let height = 30.0 + usage_h + rows + footer + 6.0;
-        let (pw, px) = (284.0, (WIN_W - 284.0) / 2.0);
-        let py = if below { down + 6.0 } else { (top - 6.0 - height).max(1.0) };
+        let (pw, px) = (PW, side.unwrap_or((win_w - PW) / 2.0));
+        let py = match side {
+            Some(_) => side_top,
+            None if below => down + 6.0,
+            None => (top - 6.0 - height).max(1.0),
+        };
         ui.card(buf, px, py, pw, height, p.stroke, None);
         ui.label(buf, px + 12.0, py + 6.0, 180.0, 20.0, t("Phiên Claude", "Claude sessions"), Font::Bold, p.ink);
         if !view.sessions.is_empty() {
@@ -1024,7 +1116,7 @@ pub fn paint_ui(buf: &mut [u8], w: u32, h: u32, scale: f32, text: &TextDrawer, v
             ui.label(buf, px + 12.0, y, pw - 24.0, 18.0, &crate::tf!("+{extra} phiên khác", "+{extra} more"), Font::Small, p.muted);
         }
     }
-    hits.push(ui.rect((WIN_W - char_w) / 2.0 + off_x, char_top, char_w, char_h, Hit::Character));
+    hits.push(ui.rect((win_w - char_w) / 2.0 + off_x, char_top, char_w, char_h, Hit::Character));
     hits
 }
 

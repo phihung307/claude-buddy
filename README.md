@@ -80,6 +80,8 @@ This removes the app, its login item and its hooks. Settings, usage data and add
 | Click the bubble | Opens the window of the session that most needs attention |
 | Click a session row | Opens that session's terminal or IDE window |
 | Drag the character | Anywhere on the screen; the position is remembered |
+| Scroll on the character | Makes it bigger or smaller, up to the size of the screen |
+| Point at the character, then Ctrl+Q / Ctrl+W / Ctrl+R | Skills: teleport to another corner / shadow clones in the corners / full screen and back. Anywhere else, add Alt (Ctrl+Alt+Q…). After a skill, the Ctrl keys stay with the buddy for 4 seconds, so the next one needs no pointing |
 | Right-click the character or tray icon | Quick menu |
 | Click the tray icon (Windows) | Opens the main window (Characters, Usage, Settings) |
 | Click the menu bar icon (macOS) | Quick menu, with the main window under **Manage characters**, **View usage** and **Settings** |
@@ -152,10 +154,24 @@ file per state):
 Custom sounds: `sounds/done` and `sounds/waiting` as `.wav` or `.mp3`. Very long clips are cut short (limit 50 MB per
 file).
 
+Images larger than the usual size (1024 pixels, say) stay sharp when the character is made bigger or full screen.
+
+With `"autoSkills": true` in `character.json`, the character's skills go off by themselves:
+
+| When | Skill |
+|---|---|
+| Sessions have been working for 20 seconds | Shadow clones come out, and vanish when the work stops |
+| A session needs you | Teleports to the corner nearest the mouse pointer |
+| Sessions are done | Teleports to another corner |
+
+Not while full screen, while the screen is locked, or while you drag the character. Turn it on or off for any character
+from the right-click menu (**Skills follow the sessions**).
+
 ## Configuration
 
 `config.json` in `%APPDATA%\claude-buddy-rs` on Windows or `~/Library/Application Support/claude-buddy-rs` on macOS, key
 `port` (default 47329). After changing the port, reconnect to Claude Code.
+`autoCloneSeconds` (default 20) sets how long sessions work before the shadow clones come out.
 
 ## Local API
 

@@ -5,14 +5,15 @@
 
 use crate::i18n::t;
 use crate::anim::{self, CharAnim, Player};
-use crate::config::Config;
+use crate::config::{Config, MIN_ZOOM, SIZE_FACTORS};
 use crate::focus;
+use crate::fx;
 use crate::theme;
 use crate::hooks_config;
 use crate::library::{self, state_index, Character, Source};
 use crate::motion::Motion;
 use crate::picker;
-use crate::render::{self, Bubble, Hit, HitRect, TextDrawer, View, CHAR_SIZE, WIN_H, WIN_W};
+use crate::render::{self, Bubble, Hit, HitRect, TextDrawer, View, CHAR_SIZE, MOTION_MARGIN_SIDE, MOTION_MARGIN_TOP, WIN_H, WIN_W};
 use crate::server::{self, now_ms, Shared};
 use crate::sound;
 use crate::store::{self, name_of, status_of, Session, State};
@@ -23,7 +24,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows_sys::core::{w, GUID};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -36,7 +37,7 @@ use windows_sys::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, 
 use windows_sys::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT};
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -63,8 +64,49 @@ const TIMER_PANEL: usize = 4;
 const TIMER_HOVER: usize = 5;
 const TIMER_TRIM: usize = 6;
 const TIMER_SCAN: usize = 7;
+const TIMER_ZOOM: usize = 8;
 const MAX_WINDOWS_WALKED: usize = 512;
 const TRIM_DELAY_MS: u32 = 3_000;
+/// Once the wheel rests this long, the size is saved and sharper frames prepared if they would help.
+const ZOOM_SETTLE_MS: u32 = 500;
+/// Where each wheel notch lands; past the last, and capped by it, is as big as fits on the screen.
+const ZOOM_LEVELS: [f32; 12] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0];
+/// Room kept over the character for the bubble and panel, as long as the screen has it.
+const UI_ROOM: f32 = 340.0;
+/// Built-in characters are drawn, so they stay sharp at any size; past this their frames get stretched
+/// too, because a full-screen loop of them would be hundreds of MB.
+const VECTOR_PREP_MAX: f32 = 2.0;
+/// Full screen gives up at most this much of its size to show frames exactly as prepared, which costs
+/// a fraction of scaling them every frame.
+const FULL_SNAP: f32 = 0.9;
+/// The buddy never has the keyboard, so its skills are hotkeys: Ctrl+Alt+key anywhere, and plain Ctrl+key
+/// only while the pointer is on the buddy, so the rest of the time those stay with other apps (Ctrl+W
+/// closes their tabs, Ctrl+R reloads). Global ids count from 1, the hover ones from HOVER_HOTKEY.
+const SKILL_KEYS: [(Skill, u32); 3] = [(Skill::Blink, b'Q' as u32), (Skill::Clones, b'W' as u32), (Skill::Ultimate, b'R' as u32)];
+const HOVER_HOTKEY: i32 = 11;
+const TIMER_SKILL: usize = 9;
+const TIMER_COMBO: usize = 10;
+const TIMER_AUTO_CLONE: usize = 11;
+/// After a skill the plain Ctrl keys stay with the buddy this long, wherever the pointer is, so the
+/// next one can follow without chasing the buddy into its new corner first.
+const COMBO_MS: u32 = 4_000;
+const SKILL_FRAME_MS: u32 = 16;
+/// Teleport: the buddy fades out over the mark, jumps, and fades in inside a flash.
+const BLINK_OUT_MS: u64 = 160;
+const BLINK_IN_MS: u64 = 160;
+const FLASH_MS: u64 = 420;
+const SMOKE_MS: u64 = 450;
+/// Clones fade in a little after their smoke bursts, and out quicker than it clears.
+const CLONE_FADE_IN_DELAY_MS: u64 = 80;
+const CLONE_FADE_MS: u64 = 150;
+const CLONE_LIFE_MS: u64 = 8_000;
+const CLONE_STAGGER_MS: u64 = 120;
+/// Ultimate: the flash goes off first, then the buddy fills the screen.
+const ULTIMATE_DELAY_MS: u64 = 150;
+const FULL_WAIT_MS: u64 = 1_500;
+/// Bigger flashes would cost more to draw than they add.
+const MAX_FLASH_PX: u32 = 1000;
+const FX_CLASS: *const u16 = w!("ClaudeBuddyFx");
 /// A finished turn is counted after this, so a burst of them costs one scan.
 const SCAN_DELAY_MS: u32 = 20_000;
 /// How long the bubble stays after a session's state changes, unless it needs you.
@@ -73,7 +115,6 @@ const BUBBLE_MS: u32 = 8_000;
 const HOVER_GRACE_MS: u32 = 500;
 /// An open panel closes by itself soon after the pointer leaves, so it is never left covering work.
 const PANEL_GRACE_MS: u32 = 2_500;
-const SIZE_FACTORS: [f32; 3] = [0.75, 1.0, 1.25];
 const BALLOON_ICON_SIZE: u32 = 64;
 const HOUSEKEEPING_MS: u32 = 5_000;
 const ACTIVE_FRAME_MS: u32 = 33;
@@ -103,6 +144,10 @@ const CMD_PICKER: usize = 8;
 const CMD_SETTINGS: usize = 11;
 const CMD_USER_FOLDER: usize = 9;
 const CMD_USAGE: usize = 10;
+const CMD_FULL: usize = 12;
+const CMD_BLINK: usize = 13;
+const CMD_CLONES: usize = 14;
+const CMD_AUTO_SKILLS: usize = 15;
 const CMD_CHARACTER: usize = 100;
 
 const RUN_KEY: *const u16 = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
@@ -244,11 +289,136 @@ impl Drop for Canvas {
     }
 }
 
+/// Pushes a canvas to its layered window; `dirty` limits what the compositor has to take in.
+fn present_layered(hwnd: HWND, canvas: &Canvas, dirty: Option<(u32, u32, u32, u32)>, alpha: u8) {
+    let size = SIZE { cx: canvas.w as i32, cy: canvas.h as i32 };
+    let src = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
+    let rect = dirty.map(|(x, y, w, h)| RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 });
+    let info = UPDATELAYEREDWINDOWINFO {
+        cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+        hdcDst: std::ptr::null_mut(),
+        pptDst: std::ptr::null(),
+        psize: &size,
+        hdcSrc: canvas.dc,
+        pptSrc: &src,
+        crKey: 0,
+        pblend: &blend,
+        dwFlags: ULW_ALPHA,
+        prcDirty: rect.as_ref().map_or(std::ptr::null(), |r| r as *const RECT),
+    };
+    unsafe { UpdateLayeredWindowIndirect(hwnd, &info) };
+}
+
+/// A small window of its own, for an effect or a clone. Clicks go through it to whatever is underneath.
+struct Sprite {
+    hwnd: HWND,
+    canvas: Canvas,
+    shown: bool,
+}
+
+impl Sprite {
+    fn new(x: i32, y: i32, w: u32, h: u32) -> Option<Sprite> {
+        let canvas = Canvas::new(w.max(1), h.max(1))?;
+        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        let hwnd = unsafe { CreateWindowExW(ex, FX_CLASS, w!(""), WS_POPUP, x, y, canvas.w as i32, canvas.h as i32, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null()) };
+        (!hwnd.is_null()).then_some(Sprite { hwnd, canvas, shown: false })
+    }
+
+    /// `size` pixels square, centred on a point of the screen.
+    fn around(c: (i32, i32), size: u32) -> Option<Sprite> {
+        Sprite::new(c.0 - size as i32 / 2, c.1 - size as i32 / 2, size, size)
+    }
+
+    /// Redraws the whole sprite with `f` and puts it on screen.
+    fn draw(&mut self, f: impl FnOnce(&mut [u8], u32, u32)) {
+        let (w, h) = (self.canvas.w, self.canvas.h);
+        let buf = unsafe { std::slice::from_raw_parts_mut(self.canvas.bits, (w * h * 4) as usize) };
+        buf.fill(0);
+        f(buf, w, h);
+        present_layered(self.hwnd, &self.canvas, None, 255);
+        if !self.shown {
+            self.shown = true;
+            unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        }
+    }
+}
+
+impl Drop for Sprite {
+    fn drop(&mut self) {
+        unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+unsafe extern "system" fn fx_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Skill {
+    /// Q: Flying Thunder God, a teleport to another corner of the screen.
+    Blink,
+    /// W: shadow clones in the corners.
+    Clones,
+    /// R: full screen.
+    Ultimate,
+}
+
+fn skill_of_hotkey(id: i32) -> Option<Skill> {
+    let i = if id >= HOVER_HOTKEY { id - HOVER_HOTKEY } else { id - 1 };
+    usize::try_from(i).ok().and_then(|i| SKILL_KEYS.get(i)).map(|k| k.0)
+}
+
+/// Taken by another app, a shortcut is simply missing; the menu still has every skill.
+fn register_skill_keys(hwnd: HWND, hover: bool) {
+    for (i, (_, key)) in SKILL_KEYS.iter().enumerate() {
+        let (id, mods) = if hover { (HOVER_HOTKEY + i as i32, MOD_CONTROL) } else { (1 + i as i32, MOD_CONTROL | MOD_ALT) };
+        unsafe { RegisterHotKey(hwnd, id, mods | MOD_NOREPEAT, *key) };
+    }
+}
+
+fn unregister_skill_keys(hwnd: HWND, hover: bool) {
+    let base = if hover { HOVER_HOTKEY } else { 1 };
+    for i in 0..SKILL_KEYS.len() as i32 {
+        unsafe { UnregisterHotKey(hwnd, base + i) };
+    }
+}
+
+/// A teleport under way.
+struct Blink {
+    start: Instant,
+    from: Option<Sprite>,
+    to: Option<Sprite>,
+    dest: DragStep,
+    jumped: bool,
+}
+
+/// What a clone shows: frames of its own, or a built-in character drawn afresh.
+enum CloneBody {
+    Frames(Player),
+    Drawn(usize),
+}
+
+/// A shadow clone: the character again, playing on its own in a corner.
+struct Bunshin {
+    sprite: Sprite,
+    body: CloneBody,
+    /// How much its frames are stretched (for a drawn one, its pixel density), where its feet are on
+    /// the sprite, and how big it is there.
+    k: f32,
+    feet: (f32, f32),
+    size: (f32, f32),
+    born: Instant,
+    leave_at: Instant,
+    drawn: bool,
+}
+
 /// What the character looks like right now.
 enum Visual {
     Vector(usize),
-    /// `room`: keeps the margins that movement on the stage needs.
-    Media { player: Player, states: Box<[(Motion, bool); 5]>, room: bool },
+    /// `room`: keeps the margins that movement on the stage needs. `prep`: the pixel density the frames
+    /// were prepared at; showing them bigger than that stretches them.
+    Media { player: Player, states: Box<[(Motion, bool); 5]>, room: bool, prep: f32 },
 }
 
 /// A character finished loading on a worker thread.
@@ -256,6 +426,37 @@ struct Loaded {
     token: u64,
     id: String,
     result: Result<Arc<CharAnim>, String>,
+    prep: f32,
+    native: Option<f32>,
+}
+
+/// Density to prepare frames at. Up to the large size, exactly what is shown, so frames are only
+/// copied. Bigger, all that the source holds (for drawn characters, a fixed cap): one build then
+/// serves every zoom up to full screen, and the wheel never waits on another. Rounded so the same
+/// size always finds the same cache file. Never past `full`, the density of full screen when known:
+/// more would only be scaled down again on every frame. Rounded down, so full screen can show the
+/// frames exactly as they are.
+fn prep_density(char_scale: f32, scale: f32, native: Option<f32>, full: Option<f32>) -> f32 {
+    let usual = scale * SIZE_FACTORS[2];
+    let d = if char_scale <= usual + 0.001 { char_scale } else { native.map_or(scale * VECTOR_PREP_MAX, |n| n.max(usual)).min(full.unwrap_or(f32::MAX)).max(usual) };
+    (d * 100.0 + 0.001).floor() / 100.0
+}
+
+/// Where the window goes when its size changes.
+enum Anchor {
+    /// Grows and shrinks around the bottom middle, where the character stands.
+    Keep,
+    At((i32, i32)),
+    /// Bottom middle of the screen.
+    ScreenBottom,
+}
+
+/// What full screen returns to.
+struct FullRestore {
+    zoom: f32,
+    pos: (i32, i32),
+    shift: f32,
+    lift: f32,
 }
 
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
@@ -314,6 +515,28 @@ struct App {
     visual: Visual,
     current_sounds: [Option<PathBuf>; 2],
     load_token: u64,
+    /// The current character's source resolution, from its last load; None for drawn ones.
+    native: Option<f32>,
+    /// The media character the frames on screen are of.
+    shown_id: String,
+    /// Density of sharper frames already being prepared, so settling twice doesn't start a second build.
+    pending_prep: Option<f32>,
+    /// Set while full screen is on.
+    full_restore: Option<FullRestore>,
+    /// Wheel movement not yet worth a whole notch, as touchpads send it.
+    wheel_acc: i32,
+    /// The whole window's opacity, which the teleport fades.
+    alpha: u8,
+    blink: Option<Blink>,
+    bunshin: Vec<Bunshin>,
+    /// Ultimate flashes going off, and when the full screen they announce comes.
+    bursts: Vec<(Sprite, Instant)>,
+    full_at: Option<Instant>,
+    /// Full screen waits until this for its sharp frames, so it doesn't open blurred: loading them
+    /// from the cache takes a moment, building them takes far too long to wait for.
+    full_wait: Option<Instant>,
+    /// A skill was just used: the plain Ctrl keys stay registered until TIMER_COMBO.
+    combo: bool,
     state_since: Instant,
     sessions: Vec<Session>,
     panel_open: bool,
@@ -376,23 +599,7 @@ impl App {
 
     /// Pushes the buffer to the screen; `dirty` limits what the compositor has to take in.
     fn present(&mut self, dirty: Option<(u32, u32, u32, u32)>) {
-        let size = SIZE { cx: self.canvas.w as i32, cy: self.canvas.h as i32 };
-        let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
-        let rect = dirty.map(|(x, y, w, h)| RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 });
-        let info = UPDATELAYEREDWINDOWINFO {
-            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
-            hdcDst: std::ptr::null_mut(),
-            pptDst: std::ptr::null(),
-            psize: &size,
-            hdcSrc: self.canvas.dc,
-            pptSrc: &src,
-            crKey: 0,
-            pblend: &blend,
-            dwFlags: ULW_ALPHA,
-            prcDirty: rect.as_ref().map_or(std::ptr::null(), |r| r as *const RECT),
-        };
-        unsafe { UpdateLayeredWindowIndirect(self.hwnd, &info) };
+        present_layered(self.hwnd, &self.canvas, dirty, self.alpha);
     }
 
     fn time(&self) -> f32 {
@@ -408,14 +615,18 @@ impl App {
         let buf = unsafe { std::slice::from_raw_parts_mut(self.canvas.bits, (w * h * 4) as usize) };
         match &mut self.visual {
             Visual::Vector(kind) => Some(render::paint_character(buf, w, h, scale, *kind, state, t, off)),
-            Visual::Media { player, states, room } => {
+            Visual::Media { player, states, room, prep } => {
                 let (motion, badge) = states[state_index(state)];
                 let changed = player.advance(now_ms());
                 let (fw, fh) = (player.anim.w, player.anim.h);
+                let stretch = scale / *prep;
                 if force || motion != Motion::None || badge {
                     let moving = self.state_since.elapsed().as_secs_f32();
                     let badge = badge.then_some(state);
-                    return Some(render::paint_stage(buf, w, h, scale, &player.pixels, fw, fh, motion.at(moving), badge, t, off, *room));
+                    return Some(render::paint_stage_zoomed(buf, w, h, scale, &player.pixels, fw, fh, motion.at(moving), badge, t, off, *room, stretch));
+                }
+                if (stretch - 1.0).abs() > 0.001 {
+                    return changed.map(|r| render::paint_change_zoomed(buf, w, h, scale, &player.pixels, fw, fh, r, off, stretch)).filter(|r| r.2 > 0);
                 }
                 // The usual case: only what differs from the last frame, or nothing at all.
                 changed.map(|r| render::paint_change(buf, w, h, scale, &player.pixels, fw, fh, r, off)).filter(|r| r.2 > 0)
@@ -430,7 +641,497 @@ impl App {
 
     /// Pixel density the character is drawn at: the display's, times the chosen size.
     fn char_scale(&self) -> f32 {
-        self.scale * SIZE_FACTORS[self.config.size.min(2) as usize]
+        self.scale * self.config.zoom
+    }
+
+    /// How much the prepared frames are stretched to reach the size shown.
+    fn stretch(&self) -> f32 {
+        match &self.visual {
+            Visual::Media { prep, .. } => self.char_scale() / prep,
+            Visual::Vector(_) => 1.0,
+        }
+    }
+
+    /// The character at zoom 1 in logical pixels, and the room motion adds around it; both grow with
+    /// the zoom: (body w, body h, margin w, margin h).
+    fn char_dims(&self) -> (f32, f32, f32, f32) {
+        let room = (MOTION_MARGIN_SIDE * 2.0, MOTION_MARGIN_TOP);
+        match &self.visual {
+            Visual::Media { player, prep, room: true, .. } => (player.anim.w as f32 / prep, player.anim.h as f32 / prep, room.0, room.1),
+            Visual::Media { .. } => (CHAR_SIZE, CHAR_SIZE, 0.0, 0.0),
+            // A media character still loading: the largest its stage can be.
+            Visual::Vector(_) => match self.current() {
+                Some(c) if !c.is_builtin() => (anim::MAX_WIDTH, (anim::BASE_HEIGHT * c.scale).min(anim::MAX_STAGE_HEIGHT), room.0, room.1),
+                _ => (CHAR_SIZE, CHAR_SIZE, 0.0, 0.0),
+            },
+        }
+    }
+
+    fn area(&self) -> RECT {
+        let (x, y) = self.window_pos();
+        let (w, h) = self.size();
+        work_area(POINT { x: x + w / 2, y: y + h / 2 })
+    }
+
+    fn area_logical(&self) -> (f32, f32) {
+        let a = self.area();
+        ((a.right - a.left) as f32 / self.scale, (a.bottom - a.top) as f32 / self.scale)
+    }
+
+    /// The zoom at which the character is as big as the screen allows: full screen.
+    fn max_zoom(&self) -> f32 {
+        let (bw, bh, mw, mh) = self.char_dims();
+        let (aw, ah) = self.area_logical();
+        // The gap under the feet grows with the character too.
+        (ah / (bh + mh + CHAR_GAP)).min(aw / (bw + mw)).max(MIN_ZOOM)
+    }
+
+    /// Pixel density of character `id` at full screen, once its size is known: it is the one on screen.
+    fn full_density(&self, id: &str) -> Option<f32> {
+        (matches!(self.visual, Visual::Media { .. }) && self.shown_id == id).then(|| self.scale * self.max_zoom())
+    }
+
+    /// Full screen: as big as fits, or a touch smaller when that is the size the frames were prepared
+    /// at, so they are copied as they are instead of scaled on every frame.
+    fn full_zoom(&self) -> f32 {
+        let max = self.max_zoom();
+        match &self.visual {
+            Visual::Media { prep, .. } if (max * FULL_SNAP..=max).contains(&(prep / self.scale)) => prep / self.scale,
+            _ => max,
+        }
+    }
+
+    /// Window size in pixels for the current zoom: the usual one, or bigger to hold a bigger
+    /// character with the bubble's room over it, never past the screen.
+    fn wanted_size(&self) -> (u32, u32) {
+        let (bw, bh, mw, mh) = self.char_dims();
+        let f = self.config.zoom;
+        let (aw, ah) = self.area_logical();
+        // Full screen spans the screen: with no room left over the character, the bubble and panel
+        // go beside it.
+        let w = if self.full_restore.is_some() { aw } else { WIN_W.max((bw + mw) * f).min(aw) };
+        let h = WIN_H.max((bh + mh + CHAR_GAP) * f + UI_ROOM).min(ah);
+        ((w * self.scale).ceil() as u32, (h * self.scale).ceil() as u32)
+    }
+
+    /// Resizes the window to suit the zoom. The caller repaints.
+    fn fit_window(&mut self, anchor: Anchor) {
+        let (w, h) = self.wanted_size();
+        let (ox, oy) = self.window_pos();
+        let (ow, oh) = self.size();
+        let a = self.area();
+        if (w, h) != (self.canvas.w, self.canvas.h) {
+            let Some(canvas) = Canvas::new(w, h) else { return };
+            self.canvas = canvas;
+        }
+        let (w, h) = (w as i32, h as i32);
+        let (x, y) = match anchor {
+            Anchor::Keep => (ox + (ow - w) / 2, oy + oh - h),
+            Anchor::At(p) => p,
+            Anchor::ScreenBottom => ((a.left + a.right - w) / 2, a.bottom - h),
+        };
+        let (x, y) = clamp_to(&a, x, y, w, h);
+        unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+        self.clamp_offset();
+    }
+
+    /// Shows the character at `z` times its usual size right away, stretching the frames it has;
+    /// sharper ones follow once the wheel rests.
+    fn set_zoom(&mut self, z: f32) {
+        let z = z.clamp(MIN_ZOOM, self.max_zoom());
+        if (z - self.config.zoom).abs() < 0.0005 {
+            return;
+        }
+        self.config.zoom = z;
+        if let Some(i) = SIZE_FACTORS.iter().position(|f| (f - z).abs() < 0.0005) {
+            self.config.size = i as u8;
+        }
+        self.fit_window(Anchor::Keep);
+        self.repaint_if_shown();
+        unsafe { SetTimer(self.hwnd, TIMER_ZOOM, ZOOM_SETTLE_MS, None) };
+    }
+
+    /// One wheel notch up or down the ladder of sizes.
+    fn zoom_step(&mut self, up: bool) {
+        let (cur, max) = (self.config.zoom, self.max_zoom());
+        let next = if up {
+            ZOOM_LEVELS.iter().copied().find(|z| *z > cur + 0.001).unwrap_or(max).min(max)
+        } else {
+            ZOOM_LEVELS.iter().rev().copied().find(|z| *z < cur - 0.001).unwrap_or(MIN_ZOOM)
+        };
+        self.set_zoom(next);
+    }
+
+    fn zoom_settled(&mut self) {
+        unsafe { KillTimer(self.hwnd, TIMER_ZOOM) };
+        self.config.position = Some(self.window_pos());
+        self.save_config();
+        let Visual::Media { prep, .. } = &self.visual else { return };
+        let want = prep_density(self.char_scale(), self.scale, self.native, self.full_density(&self.shown_id));
+        let differs = |p: f32| (want - p).abs() > 0.005;
+        if differs(*prep) && self.pending_prep.is_none_or(differs) {
+            self.pending_prep = Some(want);
+            self.apply_character();
+        }
+    }
+
+    /// Full screen isn't kept across a restart, so while it is on, what is saved is the size and
+    /// spot it goes back to.
+    fn save_config(&self) {
+        match &self.full_restore {
+            Some(r) => Config { zoom: r.zoom, position: Some(r.pos), shift: r.shift, lift: r.lift, ..self.config.clone() }.save(),
+            None => self.config.save(),
+        }
+    }
+
+    /// Full screen and back to the size and spot it had before.
+    fn toggle_full(&mut self) {
+        if let Some(r) = self.full_restore.take() {
+            self.config.zoom = r.zoom;
+            self.config.shift = r.shift;
+            self.config.lift = r.lift;
+            self.fit_window(Anchor::At(r.pos));
+        } else {
+            self.full_restore = Some(FullRestore { zoom: self.config.zoom, pos: self.window_pos(), shift: self.config.shift, lift: self.config.lift });
+            self.config.shift = 0.0;
+            self.config.lift = 0.0;
+            self.config.zoom = self.full_zoom();
+            self.fit_window(Anchor::ScreenBottom);
+        }
+        self.repaint_if_shown();
+        unsafe { SetTimer(self.hwnd, TIMER_ZOOM, ZOOM_SETTLE_MS, None) };
+    }
+
+    // ---- skills ----
+
+    fn use_skill(&mut self, s: Skill) {
+        // Registering again is harmless: Windows just refuses the ones already there.
+        register_skill_keys(self.hwnd, true);
+        self.combo = true;
+        unsafe { SetTimer(self.hwnd, TIMER_COMBO, COMBO_MS, None) };
+        match s {
+            Skill::Blink => self.blink(),
+            Skill::Clones => self.clones(),
+            Skill::Ultimate => self.ultimate(),
+        }
+    }
+
+    fn gap_px(&self) -> i32 {
+        (CHAR_GAP * self.scale) as i32
+    }
+
+    /// Centre of the character's body on screen, with the window at `window` and the character moved
+    /// inside it by `shift` and `lift` pixels.
+    fn body_center_at(&self, window: (i32, i32), shift: i32, lift: i32) -> (i32, i32) {
+        let (w, h) = self.size();
+        let (_, bh) = self.char_size_px();
+        (window.0 + w / 2 + shift, window.1 + h - self.gap_px() - lift - bh / 2)
+    }
+
+    fn body_center(&self) -> (i32, i32) {
+        let (shift, up) = self.offset_px();
+        self.body_center_at(self.window_pos(), shift, -up)
+    }
+
+    /// Where the window goes, and the character inside it, to stand in each corner of work area `a`.
+    fn corners(&self, a: &RECT) -> Vec<DragStep> {
+        let (w, h) = self.size();
+        let (bw, bh) = self.char_size_px();
+        let gap = self.gap_px();
+        let xs = [a.left - w / 2 + bw / 2, a.right - w / 2 - bw / 2];
+        let ys = [a.top - (h - gap - bh), a.bottom - h];
+        ys.iter().flat_map(|&y| xs.iter().map(move |&x| drag_step((x, y), (w, h), (bw, bh), gap, a))).collect()
+    }
+
+    /// Each corner of `a`, with where the character's body would be in it.
+    fn corner_spots(&self, a: &RECT) -> Vec<(DragStep, (i32, i32))> {
+        self.corners(a)
+            .into_iter()
+            .map(|s| {
+                let c = self.body_center_at(s.window, s.shift, s.lift);
+                (s, c)
+            })
+            .collect()
+    }
+
+    /// Whether a body centre is about where the character stands now.
+    fn is_here(&self, c: (i32, i32)) -> bool {
+        let here = self.body_center();
+        let (bw, bh) = self.char_size_px();
+        (c.0 - here.0).abs().max((c.1 - here.1).abs()) <= bw.max(bh) / 2
+    }
+
+    /// The corners of its screen the character isn't already standing in.
+    fn other_corners(&self) -> Vec<(DragStep, (i32, i32))> {
+        self.corner_spots(&self.area()).into_iter().filter(|(_, c)| !self.is_here(*c)).collect()
+    }
+
+    /// A flash `k` times the character's size.
+    fn flash_size(&self, k: f32) -> u32 {
+        let (bw, bh) = self.char_size_px();
+        ((bw.max(bh) as f32 * k) as u32).min(MAX_FLASH_PX)
+    }
+
+    fn skill_timer(&self) {
+        unsafe { SetTimer(self.hwnd, TIMER_SKILL, SKILL_FRAME_MS, None) };
+    }
+
+    fn can_blink(&self) -> bool {
+        self.blink.is_none() && self.full_restore.is_none() && self.full_at.is_none() && self.shown()
+    }
+
+    /// Q: gone in a flash, and back over a kunai mark in another corner.
+    fn blink(&mut self) {
+        if !self.can_blink() {
+            return;
+        }
+        let mut far = self.other_corners();
+        if far.is_empty() {
+            return;
+        }
+        let (dest, there) = far.swap_remove(now_ms() as usize % far.len());
+        self.start_blink(dest, there);
+    }
+
+    /// Q towards the pointer: to the corner nearest it, on whichever screen it is, so the buddy turns
+    /// up where you are looking. Nothing if it is already there.
+    fn blink_to_pointer(&mut self) {
+        if !self.can_blink() {
+            return;
+        }
+        let mut p = POINT { x: 0, y: 0 };
+        unsafe { GetCursorPos(&mut p) };
+        let dist = |c: (i32, i32)| (c.0 - p.x).pow(2) as i64 + (c.1 - p.y).pow(2) as i64;
+        let Some((dest, there)) = self.corner_spots(&work_area(p)).into_iter().min_by_key(|(_, c)| dist(*c)) else { return };
+        if !self.is_here(there) {
+            self.start_blink(dest, there);
+        }
+    }
+
+    fn start_blink(&mut self, dest: DragStep, there: (i32, i32)) {
+        let size = self.flash_size(1.6);
+        let (from, to) = (Sprite::around(self.body_center(), size), Sprite::around(there, size));
+        self.panel_open = false;
+        self.blink = Some(Blink { start: Instant::now(), from, to, dest, jumped: false });
+        self.skill_timer();
+    }
+
+    /// W: a clone bursts out of smoke in every other corner. Again, and they go.
+    fn clones(&mut self) {
+        if !self.bunshin.is_empty() {
+            self.dismiss_clones();
+            return;
+        }
+        if self.full_restore.is_some() || self.full_at.is_some() || !self.shown() {
+            return;
+        }
+        let (k, dw, dh) = match &self.visual {
+            Visual::Media { player, .. } => {
+                let k = self.stretch();
+                (k, (player.anim.w as f32 * k).ceil() as i32, (player.anim.h as f32 * k).ceil() as i32)
+            }
+            Visual::Vector(_) => {
+                let k = self.char_scale();
+                let s = (CHAR_SIZE * k).ceil() as i32;
+                (k, s, s)
+            }
+        };
+        // Room around the character for the smoke.
+        let (m, gap) = (dw.max(dh) / 4, self.gap_px());
+        let (sw, sh) = (dw + 2 * m, dh + m + gap);
+        let (_, bh) = self.char_size_px();
+        let (now, state) = (Instant::now(), state_index(self.state));
+        for (i, (_, c)) in self.other_corners().into_iter().enumerate() {
+            let Some(sprite) = Sprite::new(c.0 - sw / 2, c.1 + bh / 2 - (sh - gap), sw as u32, sh as u32) else { continue };
+            let body = match &self.visual {
+                // Each a little ahead of the next, so they don't all move as one.
+                Visual::Media { player, .. } => CloneBody::Frames(Player::new(player.anim.clone(), state, now_ms().saturating_sub(137 * (i as u64 + 1)))),
+                Visual::Vector(kind) => CloneBody::Drawn(*kind),
+            };
+            let born = now + Duration::from_millis(CLONE_STAGGER_MS * i as u64);
+            let leave_at = born + Duration::from_millis(CLONE_LIFE_MS);
+            let (feet, size) = ((sw as f32 / 2.0, (sh - gap) as f32), (dw as f32, dh as f32));
+            self.bunshin.push(Bunshin { sprite, body, k, feet, size, born, leave_at, drawn: false });
+        }
+        self.skill_timer();
+    }
+
+    fn dismiss_clones(&mut self) {
+        let now = Instant::now();
+        for (i, b) in self.bunshin.iter_mut().enumerate() {
+            b.leave_at = b.leave_at.min(now.max(b.born) + Duration::from_millis(CLONE_STAGGER_MS * i as u64));
+        }
+    }
+
+    /// R: a flash, then full screen. Again, and back.
+    fn ultimate(&mut self) {
+        if self.full_at.is_some() || self.blink.is_some() {
+            return;
+        }
+        if self.full_restore.is_some() {
+            self.toggle_full();
+            self.burst(1.8);
+        } else {
+            self.burst(1.8);
+            self.full_at = Some(Instant::now() + Duration::from_millis(ULTIMATE_DELAY_MS));
+            // Sharp frames first, while the flash plays.
+            if let Visual::Media { prep, .. } = &self.visual {
+                let full = self.scale * self.max_zoom();
+                let want = prep_density(full, self.scale, self.native, self.full_density(&self.shown_id));
+                if (want - prep).abs() > 0.005 {
+                    self.full_wait = Some(Instant::now() + Duration::from_millis(FULL_WAIT_MS));
+                    self.pending_prep = Some(want);
+                    self.apply_character_at(full);
+                }
+            }
+        }
+        self.skill_timer();
+    }
+
+    fn burst(&mut self, k: f32) {
+        if !self.shown() {
+            return;
+        }
+        if let Some(s) = Sprite::around(self.body_center(), self.flash_size(k)) {
+            self.bursts.push((s, Instant::now()));
+        }
+    }
+
+    fn skill_tick(&mut self) {
+        let now = Instant::now();
+        let ms = |since: Instant| now.saturating_duration_since(since).as_millis() as u64;
+        if self.full_at.is_some_and(|t| now >= t) && self.full_wait.is_none_or(|t| now >= t) {
+            self.full_at = None;
+            self.full_wait = None;
+            self.dismiss_clones();
+            self.toggle_full();
+            self.burst(1.2);
+        }
+        if let Some(b) = &mut self.blink {
+            let t = ms(b.start);
+            if let Some(s) = &mut b.from {
+                s.draw(|buf, w, h| fx::paint_flash(buf, w, h, t as f32 / FLASH_MS as f32));
+            }
+            if let Some(s) = &mut b.to {
+                s.draw(|buf, w, h| {
+                    if t < BLINK_OUT_MS {
+                        fx::paint_mark(buf, w, h, t as f32 / BLINK_OUT_MS as f32)
+                    } else {
+                        fx::paint_flash(buf, w, h, (t - BLINK_OUT_MS) as f32 / FLASH_MS as f32)
+                    }
+                });
+            }
+            let jump = (t >= BLINK_OUT_MS && !b.jumped).then(|| {
+                b.jumped = true;
+                (b.dest.window, b.dest.shift, b.dest.lift)
+            });
+            let alpha = if t < BLINK_OUT_MS { 1.0 - t as f32 / BLINK_OUT_MS as f32 } else { (t - BLINK_OUT_MS) as f32 / BLINK_IN_MS as f32 };
+            let done = t >= BLINK_OUT_MS + FLASH_MS;
+            self.alpha = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+            if let Some((pos, shift, lift)) = jump {
+                self.move_to(pos.0, pos.1);
+                self.config.shift = shift as f32 / self.scale;
+                self.config.lift = lift as f32 / self.scale;
+                self.repaint();
+            }
+            if done {
+                self.blink = None;
+                self.alpha = 255;
+                self.config.position = Some(self.window_pos());
+                self.save_config();
+            }
+            self.present(None);
+        }
+        let (clock, state, t) = (now_ms(), self.state, self.time());
+        for b in &mut self.bunshin {
+            if now < b.born {
+                continue;
+            }
+            let (age, leaving, gone) = (ms(b.born), now >= b.leave_at, ms(b.leave_at));
+            let smoke = if leaving {
+                Some(gone as f32 / SMOKE_MS as f32)
+            } else {
+                (age < SMOKE_MS).then(|| age as f32 / SMOKE_MS as f32)
+            };
+            let opacity = if leaving { 1.0 - gone as f32 / CLONE_FADE_MS as f32 } else { age.saturating_sub(CLONE_FADE_IN_DELAY_MS) as f32 / CLONE_FADE_MS as f32 }.clamp(0.0, 1.0);
+            // A drawn character moves all the time.
+            let changed = match &mut b.body {
+                CloneBody::Frames(player) => player.advance(clock).is_some(),
+                CloneBody::Drawn(_) => true,
+            };
+            if smoke.is_none() && !changed && b.drawn && opacity >= 1.0 {
+                continue;
+            }
+            b.drawn = true;
+            let Bunshin { sprite, body, k, feet, size, .. } = b;
+            let (k, feet, size) = (*k, *feet, *size);
+            let r = size.0.max(size.1) * 0.42;
+            sprite.draw(|buf, w, h| {
+                if opacity > 0.0 {
+                    match body {
+                        CloneBody::Frames(player) => fx::paint_frame(buf, w, h, &player.pixels, player.anim.w, player.anim.h, k, feet, opacity),
+                        CloneBody::Drawn(kind) => {
+                            render::paint_character_at(buf, w, h, k, *kind, state, t, feet);
+                            fx::fade(buf, opacity);
+                        }
+                    }
+                }
+                if let Some(p) = smoke {
+                    fx::paint_smoke(buf, w, h, feet.0, feet.1 - size.1 * 0.45, r, p);
+                }
+            });
+        }
+        self.bunshin.retain(|b| now < b.leave_at || ms(b.leave_at) < SMOKE_MS);
+        for (s, start) in &mut self.bursts {
+            let p = ms(*start) as f32 / FLASH_MS as f32;
+            s.draw(|buf, w, h| fx::paint_flash(buf, w, h, p));
+        }
+        self.bursts.retain(|(_, start)| ms(*start) < FLASH_MS);
+        if self.blink.is_none() && self.bunshin.is_empty() && self.bursts.is_empty() && self.full_at.is_none() {
+            unsafe { KillTimer(self.hwnd, TIMER_SKILL) };
+        }
+    }
+
+    fn auto_skills_on(&self) -> bool {
+        self.config.auto_skills.unwrap_or_else(|| self.current().is_some_and(|c| c.auto_skills))
+    }
+
+    /// Skills that go off by themselves: clones come to help once the sessions have worked a while,
+    /// and vanish when the work stops; finishing is a teleport, and needing you one to the pointer.
+    fn auto_skill(&mut self, from: State, to: State) {
+        unsafe { KillTimer(self.hwnd, TIMER_AUTO_CLONE) };
+        if !self.auto_skills_on() || self.nobody_watching() || self.drag.is_some() {
+            return;
+        }
+        if from == State::Working && !self.bunshin.is_empty() {
+            self.dismiss_clones();
+        }
+        match to {
+            State::Working => unsafe {
+                SetTimer(self.hwnd, TIMER_AUTO_CLONE, self.config.auto_clone_secs.saturating_mul(1000), None);
+            },
+            State::Done => self.blink(),
+            State::Waiting => self.blink_to_pointer(),
+            _ => {}
+        }
+    }
+
+    fn auto_clones_due(&mut self) {
+        unsafe { KillTimer(self.hwnd, TIMER_AUTO_CLONE) };
+        if self.state == State::Working && self.bunshin.is_empty() && self.auto_skills_on() && !self.nobody_watching() {
+            self.clones();
+        }
+    }
+
+    /// Hidden: effects and clones go at once, and the buddy is whole again when it is back.
+    fn end_skills(&mut self) {
+        self.blink = None;
+        self.bunshin.clear();
+        self.bursts.clear();
+        self.full_at = None;
+        self.full_wait = None;
+        self.alpha = 255;
+        unsafe { KillTimer(self.hwnd, TIMER_SKILL) };
     }
 
     fn bubble_mode(&self) -> Bubble {
@@ -503,6 +1204,9 @@ impl App {
     }
 
     fn apply_shown(&mut self) {
+        if !self.shown() {
+            self.end_skills();
+        }
         unsafe { ShowWindow(self.hwnd, if self.shown() { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
         self.update_timer();
         if self.shown() {
@@ -539,7 +1243,10 @@ impl App {
         match &self.visual {
             Visual::Vector(_) => ((VECTOR_BODY_W * self.char_scale()) as i32, (CHAR_SIZE * self.char_scale()) as i32),
             Visual::Media { room: false, .. } => ((VECTOR_BODY_W * self.char_scale()) as i32, (CHAR_SIZE * self.char_scale()) as i32),
-            Visual::Media { player, .. } => (player.anim.w as i32, player.anim.h as i32),
+            Visual::Media { player, .. } => {
+                let k = self.stretch();
+                ((player.anim.w as f32 * k) as i32, (player.anim.h as f32 * k) as i32)
+            }
         }
     }
 
@@ -575,12 +1282,14 @@ impl App {
     }
 
     fn char_region(&self) -> (f32, f32) {
-        let f = SIZE_FACTORS[self.config.size.min(2) as usize];
+        let f = self.config.zoom;
         match &self.visual {
             Visual::Vector(_) => (CHAR_SIZE * f, CHAR_SIZE * f),
             Visual::Media { room: false, .. } => (CHAR_SIZE * f, CHAR_SIZE * f),
             Visual::Media { player, .. } => {
-                let (w, h) = render::media_region(player.anim.w, player.anim.h, self.char_scale());
+                let k = self.stretch();
+                let win_w = self.canvas.w as f32 / self.scale;
+                let (w, h) = render::media_region_in(player.anim.w as f32 * k, player.anim.h as f32 * k, self.char_scale(), win_w / f);
                 (w * f, h * f)
             }
         }
@@ -593,6 +1302,11 @@ impl App {
     /// Shows the configured character. Vector ones are instant; media ones load on a worker thread
     /// while the old one keeps animating, then swap in at once.
     fn apply_character(&mut self) {
+        self.apply_character_at(self.char_scale());
+    }
+
+    /// Same, with frames for `char_scale`, which needn't be the size shown now.
+    fn apply_character_at(&mut self, char_scale: f32) {
         self.load_token += 1;
         let Some(c) = self.current().cloned() else {
             self.config.character = "mochi".into();
@@ -605,11 +1319,17 @@ impl App {
             self.visual = Visual::Vector(i);
             self.after_visual_change();
         }
-        let (token, hwnd, dpi) = (self.load_token, self.hwnd as isize, self.char_scale());
+        let (token, hwnd, scale, full) = (self.load_token, self.hwnd as isize, self.scale, self.full_density(&c.id));
+        // Until the character has been seen, nobody knows how big full screen makes it, and sharp
+        // frames could come out bigger than any size it is shown at. The usual size it is, then; the
+        // settle check after loading fetches the sharp ones.
+        let char_scale = if full.is_none() { char_scale.min(scale * SIZE_FACTORS[2]) } else { char_scale };
         let _ = std::thread::Builder::new().name("load-character".into()).spawn(move || {
             let max_h = (anim::BASE_HEIGHT * c.scale).min(anim::MAX_STAGE_HEIGHT);
-            let result = anim::load(&c, anim::MAX_WIDTH, max_h, dpi);
-            *LOADED.lock().unwrap() = Some(Loaded { token, id: c.id, result });
+            let native = anim::native_dpi(&c, anim::MAX_WIDTH, max_h);
+            let prep = prep_density(char_scale, scale, native, full);
+            let result = anim::load(&c, anim::MAX_WIDTH, max_h, prep);
+            *LOADED.lock().unwrap() = Some(Loaded { token, id: c.id, result, prep, native });
             unsafe { PostMessageW(hwnd as HWND, WM_ANIM_READY, 0, 0) };
         });
     }
@@ -619,13 +1339,22 @@ impl App {
         if l.token != self.load_token {
             return; // a newer choice won
         }
+        self.pending_prep = None;
+        self.full_wait = None;
         match l.result {
             Ok(a) => {
                 let Some(c) = self.library.iter().find(|c| c.id == l.id) else { return };
                 let states = Box::new(std::array::from_fn(|i| (c.states[i].motion, (c.states[i].fallback || a.failed[i]) && i != 0)));
                 let room = !c.is_builtin();
-                self.visual = Visual::Media { player: Player::new(a, state_index(self.state), now_ms()), states, room };
+                self.visual = Visual::Media { player: Player::new(a, state_index(self.state), now_ms()), states, room, prep: l.prep };
+                self.native = l.native;
+                self.shown_id = l.id;
                 self.after_visual_change();
+                // Now that its size is known, the settle check fetches sharper frames if the ones just
+                // loaded are not the best for the size shown.
+                if self.char_scale() > self.scale * SIZE_FACTORS[2] + 0.001 {
+                    unsafe { SetTimer(self.hwnd, TIMER_ZOOM, ZOOM_SETTLE_MS, None) };
+                }
             }
             // A built-in that couldn't prepare (no disk space, say) simply stays a still picture.
             Err(_) if matches!(self.visual, Visual::Vector(_)) && self.current().is_some_and(Character::is_builtin) => {}
@@ -641,6 +1370,11 @@ impl App {
     }
 
     fn after_visual_change(&mut self) {
+        // Clones of the last character, or of another size, would no longer match.
+        self.bunshin.clear();
+        // Another character fills the screen at another zoom, and may not fit at this one.
+        self.config.zoom = if self.full_restore.is_some() { self.full_zoom() } else { self.config.zoom.min(self.max_zoom()) };
+        self.fit_window(Anchor::Keep);
         self.clamp_offset();
         self.trim_soon();
         self.frame_ms = 0;
@@ -655,7 +1389,7 @@ impl App {
             return false;
         }
         self.config.character = id.to_string();
-        self.config.save();
+        self.save_config();
         self.apply_character();
         true
     }
@@ -722,10 +1456,16 @@ impl App {
         self.sessions = self.shared.store.lock().unwrap().list();
         let state = store::overall(&self.sessions);
         if state != self.state {
+            self.auto_skill(self.state, state);
             self.state = state;
             self.state_since = Instant::now();
             if let Visual::Media { player, .. } = &mut self.visual {
                 player.set_state(state_index(state), now_ms());
+            }
+            for b in &mut self.bunshin {
+                if let CloneBody::Frames(player) = &mut b.body {
+                    player.set_state(state_index(state), now_ms());
+                }
             }
         }
         self.note_state_changes();
@@ -925,19 +1665,14 @@ impl App {
         if (scale - self.scale).abs() < 0.001 {
             return;
         }
-        let (w, h) = ((WIN_W * scale).ceil() as u32, (WIN_H * scale).ceil() as u32);
-        let Some(canvas) = Canvas::new(w, h) else { return };
-        self.canvas = canvas;
         self.scale = scale;
         self.text = TextDrawer::new(scale);
         // Media frames are prepared for one pixel density, so sharp ones are fetched for the new one.
         if matches!(self.visual, Visual::Media { .. }) {
             self.apply_character();
         }
-        let (x, y) = self.window_pos();
-        let a = work_area(POINT { x: x + w as i32 / 2, y: y + h as i32 / 2 });
-        let (x, y) = clamp_to(&a, x, y, w as i32, h as i32);
-        unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), x, y, w as i32, h as i32, SWP_NOZORDER | SWP_NOACTIVATE) };
+        let pos = self.window_pos();
+        self.fit_window(Anchor::At(pos));
         self.repaint();
     }
 
@@ -954,13 +1689,25 @@ impl App {
     fn on_command(&mut self, cmd: usize) {
         match cmd {
             CMD_TOGGLE => self.set_visible(!self.visible),
+            CMD_FULL => self.use_skill(Skill::Ultimate),
+            CMD_BLINK => self.use_skill(Skill::Blink),
+            CMD_CLONES => self.use_skill(Skill::Clones),
+            CMD_AUTO_SKILLS => {
+                self.config.auto_skills = Some(!self.auto_skills_on());
+                self.save_config();
+                // Switched on mid-task, the clones count from now.
+                unsafe { KillTimer(self.hwnd, TIMER_AUTO_CLONE) };
+                if self.auto_skills_on() && self.state == State::Working {
+                    unsafe { SetTimer(self.hwnd, TIMER_AUTO_CLONE, self.config.auto_clone_secs.saturating_mul(1000), None) };
+                }
+            }
             CMD_MUTE => {
                 self.config.muted = !self.config.muted;
-                self.config.save();
+                self.save_config();
             }
             CMD_TOASTS => {
                 self.config.toasts = !self.config.toasts;
-                self.config.save();
+                self.save_config();
             }
             CMD_HOOKS => {
                 let installed = hooks_config::status(&exe_path(), self.config.port);
@@ -973,7 +1720,7 @@ impl App {
                 self.config.position = Some((x, y));
                 self.config.shift = 0.0;
                 self.config.lift = 0.0;
-                self.config.save();
+                self.save_config();
                 self.repaint();
             }
             CMD_EXIT => {
@@ -1012,6 +1759,11 @@ impl App {
                 AppendMenuW(menu, MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED }, id, l.as_ptr());
             };
             add(m, CMD_TOGGLE, if self.visible { t("Ẩn Buddy", "Hide Buddy") } else { t("Hiện Buddy", "Show Buddy") }, false);
+            // The keys as they work with the pointer on the buddy; anywhere else, with Alt too.
+            add(m, CMD_BLINK, t("Phi Lôi Thần\tCtrl+Q", "Flying Thunder God\tCtrl+Q"), false);
+            add(m, CMD_CLONES, t("Ảnh phân thân\tCtrl+W", "Shadow clones\tCtrl+W"), !self.bunshin.is_empty());
+            add(m, CMD_FULL, t("Toàn màn hình\tCtrl+R", "Full screen\tCtrl+R"), self.full_restore.is_some());
+            add(m, CMD_AUTO_SKILLS, t("Tự dùng skill theo phiên", "Skills follow the sessions"), self.auto_skills_on());
             AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
             let chars = CreatePopupMenu();
             for (i, c) in self.library.iter().enumerate() {
@@ -1068,7 +1820,7 @@ fn first_run_question() {
     );
     with_app(|a| {
         a.config.asked_hooks = true;
-        a.config.save();
+        a.save_config();
         if answer == IDYES {
             a.set_hooks(true);
         }
@@ -1093,6 +1845,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 TIMER_SCAN => with_app(|a| {
                     KillTimer(hwnd, TIMER_SCAN);
                     usage::request_scan(a.shared.clone());
+                }),
+                TIMER_ZOOM => with_app(|a| a.zoom_settled()),
+                TIMER_SKILL => with_app(|a| a.skill_tick()),
+                TIMER_AUTO_CLONE => with_app(|a| a.auto_clones_due()),
+                TIMER_COMBO => with_app(|a| {
+                    KillTimer(hwnd, TIMER_COMBO);
+                    a.combo = false;
+                    if !a.tracking_leave {
+                        unregister_skill_keys(hwnd, true);
+                    }
                 }),
                 TIMER_BUBBLE => with_app(|a| {
                     KillTimer(hwnd, TIMER_BUBBLE);
@@ -1140,6 +1902,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     TrackMouseEvent(&mut t);
                     a.tracking_leave = true;
+                    register_skill_keys(hwnd, true);
                 }
                 if let Some(d) = &mut a.drag {
                     let mut p = POINT { x: 0, y: 0 };
@@ -1173,6 +1936,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_MOUSELEAVE => {
             with_app(|a| {
+                if !a.combo {
+                    unregister_skill_keys(hwnd, true);
+                }
                 a.tracking_leave = false;
                 SetTimer(hwnd, TIMER_HOVER, HOVER_GRACE_MS, None);
                 if a.panel_open {
@@ -1192,7 +1958,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 let Some(d) = drag else { return };
                 if d.moved {
                     a.config.position = Some(a.window_pos());
-                    a.config.save();
+                    a.save_config();
                 } else {
                     a.on_click(d.hit);
                 }
@@ -1205,6 +1971,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_RBUTTONUP => {
             show_menu(hwnd);
+            0
+        }
+        WM_MOUSEWHEEL => {
+            // Windows sends the wheel to the window under the pointer, focused or not. Only over the
+            // character itself, so scrolling through the bubble or panel never resizes anything.
+            let delta = ((wp >> 16) & 0xffff) as i16 as i32;
+            let (sx, sy) = lparam_point(lp);
+            with_app(|a| {
+                let mut p = POINT { x: sx, y: sy };
+                ScreenToClient(hwnd, &mut p);
+                if a.hit_at(p.x, p.y) != Some(Hit::Character) {
+                    a.wheel_acc = 0;
+                    return;
+                }
+                a.wheel_acc += delta;
+                while a.wheel_acc.abs() >= WHEEL_DELTA as i32 {
+                    let up = a.wheel_acc > 0;
+                    a.wheel_acc -= if up { WHEEL_DELTA as i32 } else { -(WHEEL_DELTA as i32) };
+                    a.zoom_step(up);
+                }
+            });
+            0
+        }
+        WM_HOTKEY => {
+            if let Some(s) = skill_of_hotkey(wp as i32) {
+                with_app(|a| a.use_skill(s));
+            }
             0
         }
         WM_TRAY => {
@@ -1297,7 +2090,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             0
         }
         WM_DESTROY => {
+            unregister_skill_keys(hwnd, false);
+            unregister_skill_keys(hwnd, true);
             with_app(|a| {
+                a.end_skills();
                 let mut n = a.tray;
                 n.uFlags = 0;
                 Shell_NotifyIconW(NIM_DELETE, &n);
@@ -1418,6 +2214,11 @@ pub fn run() {
         wc.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
         wc.hIcon = LoadIconW(instance, 1 as *const u16);
         RegisterClassW(&wc);
+        let mut fx: WNDCLASSW = std::mem::zeroed();
+        fx.lpfnWndProc = Some(fx_proc);
+        fx.hInstance = instance;
+        fx.lpszClassName = FX_CLASS;
+        RegisterClassW(&fx);
 
         // WS_EX_NOACTIVATE: clicking the buddy must not steal focus from what you are typing in.
         let hwnd = CreateWindowExW(
@@ -1479,6 +2280,18 @@ pub fn run() {
             visual: Visual::Vector(0),
             current_sounds: [None, None],
             load_token: 0,
+            native: None,
+            shown_id: String::new(),
+            pending_prep: None,
+            full_restore: None,
+            wheel_acc: 0,
+            alpha: 255,
+            blink: None,
+            bunshin: Vec::new(),
+            bursts: Vec::new(),
+            full_at: None,
+            full_wait: None,
+            combo: false,
             state_since: Instant::now(),
             sessions: Vec::new(),
             panel_open: false,
@@ -1496,6 +2309,13 @@ pub fn run() {
         APP.with(|a| *a.borrow_mut() = Some(app));
 
         with_app(|a| {
+            // The saved spot is that of a window the zoomed size, so the window has that size first.
+            let (w, h) = a.wanted_size();
+            if (w, h) != (a.canvas.w, a.canvas.h) {
+                if let Some(c) = Canvas::new(w, h) {
+                    a.canvas = c;
+                }
+            }
             let (w, h) = a.size();
             let (x, y) = match a.config.position {
                 Some((x, y)) => clamp_to(&work_area(POINT { x: x + w / 2, y: y + h / 2 }), x, y, w, h),
@@ -1507,6 +2327,7 @@ pub fn run() {
             a.refresh();
         });
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        register_skill_keys(hwnd, false);
         SetTimer(hwnd, TIMER_HOUSEKEEPING, HOUSEKEEPING_MS, None);
         // Alt+Tab and the taskbar's previews hide every other window for a moment, which would make it blink.
         let excluded: i32 = 1;
@@ -1561,7 +2382,8 @@ pub fn settings_view() -> Option<SettingsView> {
         autostart: autostart_enabled(),
         auto_hide: a.config.auto_hide,
         translucent: a.config.translucent,
-        size: a.config.size,
+        // A wheel size between the three marks none of them.
+        size: SIZE_FACTORS.iter().position(|f| (f - a.config.zoom).abs() < 0.0005).map_or(u8::MAX, |i| i as u8),
         language: match a.config.language.as_str() {
             "vi" => 1,
             "en" => 2,
@@ -1580,28 +2402,27 @@ pub fn apply_setting(s: Setting) {
         Setting::Folder => a.on_command(CMD_USER_FOLDER),
         Setting::AutoHide => {
             a.config.auto_hide = !a.config.auto_hide;
-            a.config.save();
+            a.save_config();
             a.check_fullscreen();
         }
         Setting::Translucent => {
             a.config.translucent = !a.config.translucent;
-            a.config.save();
+            a.save_config();
             theme::set_translucent(a.config.translucent);
             a.repaint_if_shown();
         }
         Setting::Language(n) => {
             a.config.language = ["auto", "vi", "en"][n.min(2) as usize].into();
-            a.config.save();
+            a.save_config();
             crate::i18n::apply(&a.config.language);
             a.update_tip();
             a.repaint_if_shown();
         }
         Setting::Size(n) => {
+            a.full_restore = None;
+            a.set_zoom(SIZE_FACTORS[n.min(2) as usize]);
             a.config.size = n.min(2);
-            a.config.save();
-            a.apply_character();
-            a.clamp_offset();
-            a.repaint_if_shown();
+            a.zoom_settled();
         }
     });
 }
@@ -1640,6 +2461,17 @@ pub fn library_changed(edited: Option<&str>) {
 mod tests {
     use super::*;
     use crate::store::{Event, Store};
+
+    #[test]
+    fn sharp_frames_are_never_bigger_than_full_screen() {
+        // Up to the large size, exactly what is shown.
+        assert_eq!(prep_density(0.75, 1.0, Some(4.89), Some(4.64)), 0.75);
+        // Past it, the source's own resolution...
+        assert_eq!(prep_density(2.0, 1.0, Some(2.44), Some(4.64)), 2.44);
+        // ...but no more than full screen shows, rounded down so that fits exactly.
+        assert_eq!(prep_density(2.0, 1.0, Some(4.89), Some(4.6428)), 4.64);
+        assert_eq!(prep_density(2.0, 1.0, Some(4.89), None), 4.89);
+    }
 
     #[test]
     fn notifications_say_what_happened_and_where() {

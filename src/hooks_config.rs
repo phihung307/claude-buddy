@@ -22,7 +22,15 @@ pub fn settings_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return PathBuf::from(dir).join("settings.json");
     }
-    PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join(".claude").join("settings.json")
+    crate::config::home().join(".claude").join("settings.json")
+}
+
+pub fn cli(install: bool) -> i32 {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    match apply(install, &exe, crate::config::Config::load().port) {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
 }
 
 fn is_ours(h: &Value) -> bool {

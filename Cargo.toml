@@ -23,6 +23,20 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 resvg = { version = "0.49", default-features = false }
 vp9dec = "0.1"
+
+# Mapped files, local time and process priority.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-quartz-core = "0.3"
+
+[target.'cfg(windows)'.dependencies]
 # Only for MP4 through Media Foundation, whose COM interfaces windows-sys doesn't wrap.
 windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 windows-sys = { version = "0.61", features = [

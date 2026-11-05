@@ -10,9 +10,13 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::SYSTEMTIME;
+#[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_LOWEST};
+#[cfg(windows)]
 use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
 
 const MAGIC: &[u8; 4] = b"CBU1";
@@ -73,10 +77,25 @@ pub fn month_start(day: u32) -> u32 {
     day / 100 * 100 + 1
 }
 
+#[cfg(windows)]
 pub fn today() -> u32 {
     let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut t) };
     t.wYear as u32 * 10_000 + t.wMonth as u32 * 100 + t.wDay as u32
+}
+
+#[cfg(unix)]
+fn local_yyyymmdd(at: libc::time_t) -> Option<u32> {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&at, &mut tm) }.is_null() {
+        return None;
+    }
+    Some((tm.tm_year + 1900) as u32 * 10_000 + (tm.tm_mon + 1) as u32 * 100 + tm.tm_mday as u32)
+}
+
+#[cfg(unix)]
+pub fn today() -> u32 {
+    local_yyyymmdd(unsafe { libc::time(std::ptr::null_mut()) }).unwrap_or(0)
 }
 
 fn sum_from(days: &Days, from: u32, to: u32) -> Counts {
@@ -120,7 +139,8 @@ pub fn summary_line(days: &Days, today: u32) -> String {
     crate::tf!("Hôm nay {} · Tuần {} · Tháng {}", "Today {} · Week {} · Month {}", short(total(&d)), short(total(&w)), short(total(&m)))
 }
 
-fn parse_utc(ts: &str) -> Option<SYSTEMTIME> {
+/// Year, month, day, hour, minute, second.
+fn parse_utc(ts: &str) -> Option<[u16; 6]> {
     // 2026-11-04T21:32:05.123Z
     let b = ts.as_bytes();
     if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
@@ -131,15 +151,30 @@ fn parse_utc(ts: &str) -> Option<SYSTEMTIME> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    Some(SYSTEMTIME { wYear: num(0..4)?, wMonth: month, wDayOfWeek: 0, wDay: day, wHour: num(11..13)?, wMinute: num(14..16)?, wSecond: num(17..19)?, wMilliseconds: 0 })
+    Some([num(0..4)?, month, day, num(11..13)?, num(14..16)?, num(17..19)?])
 }
 
 /// The local calendar day of a UTC timestamp, using the time zone rules in force on that date.
+#[cfg(windows)]
 fn local_day(ts: &str) -> Option<u32> {
-    let utc = parse_utc(ts)?;
+    let [year, month, day, hour, minute, second] = parse_utc(ts)?;
+    let utc = SYSTEMTIME { wYear: year, wMonth: month, wDayOfWeek: 0, wDay: day, wHour: hour, wMinute: minute, wSecond: second, wMilliseconds: 0 };
     let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
     let ok = unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) };
     (ok != 0).then(|| local.wYear as u32 * 10_000 + local.wMonth as u32 * 100 + local.wDay as u32)
+}
+
+#[cfg(unix)]
+fn local_day(ts: &str) -> Option<u32> {
+    let [year, month, day, hour, minute, second] = parse_utc(ts)?;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year as i32 - 1900;
+    tm.tm_mon = month as i32 - 1;
+    tm.tm_mday = day as i32;
+    tm.tm_hour = hour as i32;
+    tm.tm_min = minute as i32;
+    tm.tm_sec = second as i32;
+    local_yyyymmdd(unsafe { libc::timegm(&mut tm) })
 }
 
 fn fnv(s: &str) -> u64 {
@@ -348,7 +383,10 @@ fn state_file() -> PathBuf {
 /// app for good; a process that exits gives all of it back.
 pub fn scan_main() {
     // Anything else that wants the CPU goes first.
+    #[cfg(windows)]
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
+    #[cfg(unix)]
+    unsafe { libc::nice(19) };
     let file = state_file();
     let mut ledger = fs::read(&file).ok().and_then(|d| Ledger::deserialize(&d)).unwrap_or_default();
     if scan_into(&mut ledger, &projects_dir(), today()) {
@@ -377,8 +415,11 @@ pub fn request_scan(shared: Arc<Shared>) {
         }
         worker.scanned.store(true, Ordering::Release);
         worker.scanning.store(false, Ordering::Release);
-        crate::window::wake(worker.hwnd.load(Ordering::Relaxed));
-        crate::picker::notify_changed();
+        #[cfg(windows)]
+        {
+            crate::window::wake(worker.hwnd.load(Ordering::Relaxed));
+            crate::picker::notify_changed();
+        }
     });
     if spawned.is_err() {
         shared.scanning.store(false, Ordering::Release);

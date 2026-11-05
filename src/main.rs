@@ -7,27 +7,36 @@
 //!   claude-buddy-rs --cut-sheets <folder> <output folder>   cut sprite sheets into animated PNGs
 
 #![windows_subsystem = "windows"]
+// Elsewhere only the part without a window exists so far, so much of what it serves goes unused.
+#![cfg_attr(not(windows), allow(dead_code, unused_imports, unused_variables))]
 
 mod anim;
 mod codex;
 mod config;
+#[cfg(windows)]
 mod focus;
 mod hook;
 mod hooks_config;
 mod i18n;
 mod library;
+#[cfg(target_os = "macos")]
+mod mac;
 mod media;
+#[cfg(windows)]
 mod mf;
 mod motion;
+#[cfg(windows)]
 mod picker;
 mod render;
 mod sheet;
 mod server;
+#[cfg(windows)]
 mod sound;
 mod store;
 mod theme;
 mod usage;
 mod webm;
+#[cfg(windows)]
 mod window;
 
 fn main() {
@@ -45,9 +54,17 @@ fn main() {
         Some("--scan-usage") => usage::scan_main(),
         Some("--prepare") => std::process::exit(anim::prepare_main(&args[1..])),
         Some("--cut-sheets") => std::process::exit(sheet::cut_main(&args[1..])),
-        Some("--install-hooks") => std::process::exit(window::hooks_cli(true)),
-        Some("--remove-hooks") => std::process::exit(window::hooks_cli(false)),
+        Some("--install-hooks") => std::process::exit(hooks_config::cli(true)),
+        Some("--remove-hooks") => std::process::exit(hooks_config::cli(false)),
+        #[cfg(windows)]
         _ => window::run(),
+        #[cfg(target_os = "macos")]
+        _ => mac::run(),
+        #[cfg(not(any(windows, target_os = "macos")))]
+        _ => {
+            eprintln!("Claude Buddy has no window on this system yet. Hooks, usage and character tools work from the command line.");
+            std::process::exit(1);
+        }
     }
 }
 

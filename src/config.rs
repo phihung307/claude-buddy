@@ -41,7 +41,22 @@ pub fn dir() -> PathBuf {
     if let Some(d) = std::env::var_os("CLAUDE_BUDDY_RS_HOME") {
         return PathBuf::from(d);
     }
-    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("claude-buddy-rs")
+    let base = if cfg!(windows) {
+        PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default())
+    } else if cfg!(target_os = "macos") {
+        home().join("Library").join("Application Support")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from)
+    };
+    base.join("claude-buddy-rs")
+}
+
+pub fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default())
+}
+
+pub fn user_root() -> PathBuf {
+    dir().join("characters")
 }
 
 fn parse(text: &str) -> Config {

@@ -5,7 +5,7 @@
 
 use crate::i18n::t;
 use crate::anim::{self, CharAnim, Player};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::focus;
 use crate::theme;
 use crate::hooks_config;
@@ -135,14 +135,6 @@ fn message_box(text: &str, flags: u32) -> i32 {
     unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), w!("Claude Buddy"), flags | MB_SETFOREGROUND) }
 }
 
-pub fn hooks_cli(install: bool) -> i32 {
-    let port = Config::load().port;
-    match hooks_config::apply(install, &exe_path(), port) {
-        Ok(_) => 0,
-        Err(_) => 1,
-    }
-}
-
 fn autostart_enabled() -> bool {
     unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) == ERROR_SUCCESS }
 }
@@ -232,9 +224,7 @@ struct Loaded {
 
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
 
-pub fn user_root() -> PathBuf {
-    config::dir().join("characters")
-}
+pub use crate::config::user_root;
 
 struct Drag {
     start_cursor: POINT,

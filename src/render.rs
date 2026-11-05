@@ -10,7 +10,9 @@ use std::f32::consts::{PI, TAU};
 use tiny_skia::{
     BlendMode, Color, FillRule, FilterQuality, GradientStop, LineCap, LinearGradient, Paint, Path, PathBuilder, PixmapMut, PixmapPaint, PixmapRef, Point, Rect, SpreadMode, Stroke, Transform,
 };
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{RECT, SIZE};
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetTextExtentPoint32W, SelectObject,
     SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, DIB_RGB_COLORS, DT_END_ELLIPSIS,
@@ -562,12 +564,14 @@ pub enum Font {
 
 /// Text comes from GDI so Vietnamese and symbols get Windows' own fonts and fallback, with no font
 /// bundled. GDI can't write alpha, so it draws white on black and that becomes the coverage mask.
+#[cfg(windows)]
 pub struct TextDrawer {
     dc: HDC,
     fonts: [HFONT; 7],
 }
 
 /// Whether a font is installed: asking for a missing one silently gives a different font.
+#[cfg(windows)]
 fn has_font(dc: HDC, name: &str) -> bool {
     let wanted: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -582,21 +586,47 @@ fn has_font(dc: HDC, name: &str) -> bool {
 }
 
 /// Windows 11's UI font, or Windows 10's.
+#[cfg(windows)]
 fn ui_face(dc: HDC) -> Vec<u16> {
     let name = if has_font(dc, "Segoe UI Variable Text") { "Segoe UI Variable Text" } else { "Segoe UI" };
     name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// Windows 11's icon font, or Windows 10's. They share code points.
+#[cfg(windows)]
 fn icon_face(dc: HDC) -> Vec<u16> {
     let name = if has_font(dc, "Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
     name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
+/// Each system draws its own text; nothing outside Windows has a window to draw it in yet.
+#[cfg(not(windows))]
+pub struct TextDrawer;
+
+#[cfg(not(windows))]
+impl TextDrawer {
+    pub fn new(_scale: f32) -> TextDrawer {
+        TextDrawer
+    }
+
+    pub fn new_ui(_scale: f32) -> TextDrawer {
+        TextDrawer
+    }
+
+    pub fn width(&self, s: &str, _f: Font) -> i32 {
+        s.chars().count() as i32 * 7
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&self, _buf: &mut [u8], _w: u32, _h: u32, _x: i32, _y: i32, _bw: i32, _bh: i32, _s: &str, _f: Font, _color: u32) {}
+}
+
+#[cfg(windows)]
 impl TextDrawer {
     /// For the buddy's window: compact sizes.
     pub fn new(scale: f32) -> TextDrawer {
@@ -705,6 +735,7 @@ impl TextDrawer {
     }
 }
 
+#[cfg(windows)]
 impl Drop for TextDrawer {
     fn drop(&mut self) {
         unsafe {
@@ -1240,6 +1271,7 @@ pub mod tests {
         assert!(rows.iter().all(|r| r.y + r.h <= bubble.y), "rows overlap the bubble");
     }
 
+    #[cfg(windows)]
     #[test]
     fn text_is_solid_and_keeps_its_colour_on_any_surface() {
         let (w, h) = (120u32, 40u32);

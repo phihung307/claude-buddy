@@ -8,31 +8,37 @@ use crate::library::STATE_KEYS;
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
 
 const PROMPT: &str = include_str!("codex_prompt.txt");
 pub const MAX_DESCRIPTION: usize = 2000;
 const TIME_LIMIT: Duration = Duration::from_secs(30 * 60);
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CODEX_EXE: &str = if cfg!(windows) { "codex.exe" } else { "codex" };
 const CANCELLED: &str = "cancelled";
 
 /// Codex from PATH, or the one the Codex app keeps for itself, newest first.
 pub fn find() -> Option<PathBuf> {
-    let on_path = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join("codex.exe")).find(|p| p.is_file()));
+    let on_path = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|d| d.join(CODEX_EXE)).find(|p| p.is_file()));
     on_path.or_else(|| {
         let bin = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("OpenAI").join("Codex").join("bin");
         let mut found: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(bin)
             .ok()?
             .flatten()
-            .map(|e| e.path().join("codex.exe"))
+            .map(|e| e.path().join(CODEX_EXE))
             .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
             .collect();
         found.sort();
@@ -78,6 +84,7 @@ fn name_from(reply: &str, description: &str) -> String {
 }
 
 /// So that Codex can't keep running, and keep spending the user's quota, after the app is gone.
+#[cfg(windows)]
 fn die_with_this_app(child: &std::process::Child) -> Option<*mut core::ffi::c_void> {
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -102,7 +109,10 @@ pub struct Drawn {
 }
 
 /// What every run shares: its own sandbox settings, none of the user's, and JSON events to read.
+#[cfg(windows)]
 const COMMON: [&str; 6] = ["--skip-git-repo-check", "--ignore-user-config", "-c", "windows.sandbox=\"unelevated\"", "-c", "sandbox_mode=\"workspace-write\""];
+#[cfg(not(windows))]
+const COMMON: [&str; 4] = ["--skip-git-repo-check", "--ignore-user-config", "-c", "sandbox_mode=\"workspace-write\""];
 
 struct Run {
     session: Option<String>,
@@ -114,7 +124,10 @@ struct Run {
 fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBool, done: &AtomicUsize) -> Result<Run, String> {
     let exe = find().ok_or(t("Không tìm thấy Codex trên máy này.", "Codex wasn't found on this PC."))?;
     let reply_file = dir.join("reply.txt");
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
         .arg("exec")
         .args(args)
         .args(COMMON)
@@ -125,9 +138,9 @@ fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBoo
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| crate::tf!("Không chạy được Codex: {e}", "Could not run Codex: {e}"))?;
+    #[cfg(windows)]
     let job = die_with_this_app(&child);
     // Through stdin, never the command line: this is free text from the user.
     if let Some(mut stdin) = child.stdin.take() {
@@ -167,6 +180,7 @@ fn run(args: &[std::ffi::OsString], prompt: &str, dir: &Path, cancel: &AtomicBoo
     };
     let _ = child.wait();
     let _ = reader.join();
+    #[cfg(windows)]
     if let Some(job) = job {
         unsafe { CloseHandle(job) };
     }

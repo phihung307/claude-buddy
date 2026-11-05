@@ -39,6 +39,8 @@ pub struct Config {
     pub auto_skills: Option<bool>,
     /// How long the sessions work before shadow clones come out to help.
     pub auto_clone_secs: u32,
+    /// Install new releases by itself.
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -59,6 +61,7 @@ impl Default for Config {
             language: "auto".into(),
             auto_skills: None,
             auto_clone_secs: 20,
+            auto_update: true,
         }
     }
 }
@@ -72,6 +75,7 @@ pub enum Setting {
     Autostart,
     AutoHide,
     Translucent,
+    AutoUpdate,
     Size(u8),
     /// 0 follows the system, 1 Vietnamese, 2 English.
     Language(u8),
@@ -87,6 +91,7 @@ pub struct SettingsView {
     pub autostart: bool,
     pub auto_hide: bool,
     pub translucent: bool,
+    pub auto_update: bool,
     pub size: u8,
     pub language: u8,
 }
@@ -141,6 +146,7 @@ fn parse(text: &str) -> Config {
         language: j.get("language").and_then(Value::as_str).unwrap_or(&d.language).to_string(),
         auto_skills: j.get("autoSkills").and_then(Value::as_bool),
         auto_clone_secs: j.get("autoCloneSeconds").and_then(Value::as_u64).map_or(d.auto_clone_secs, |s| s.clamp(1, 3600) as u32),
+        auto_update: flag("autoUpdate", d.auto_update),
     }
 }
 
@@ -159,6 +165,7 @@ fn serialize(c: &Config) -> String {
         "askedHooks": c.asked_hooks,
         "language": c.language,
         "autoCloneSeconds": c.auto_clone_secs,
+        "autoUpdate": c.auto_update,
     });
     if let Some(on) = c.auto_skills {
         j["autoSkills"] = json!(on);
@@ -192,7 +199,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let c = Config { port: 5000, position: Some((-20, 300)), muted: true, toasts: false, character: "bear".into(), shift: -12.0, lift: 40.0, size: 2, zoom: 3.5, auto_hide: false, translucent: false, asked_hooks: true, language: "en".into(), auto_skills: Some(false), auto_clone_secs: 45 };
+        let c = Config { port: 5000, position: Some((-20, 300)), muted: true, toasts: false, character: "bear".into(), shift: -12.0, lift: 40.0, size: 2, zoom: 3.5, auto_hide: false, translucent: false, asked_hooks: true, language: "en".into(), auto_skills: Some(false), auto_clone_secs: 45, auto_update: false };
         assert_eq!(parse(&serialize(&c)), c);
         let c = Config { auto_skills: None, ..c };
         assert_eq!(parse(&serialize(&c)), c);

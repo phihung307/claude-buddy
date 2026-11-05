@@ -4,6 +4,7 @@
 //!   claude-buddy-rs hook <port>      forward one Claude Code hook event to the running app
 //!   claude-buddy-rs --install-hooks  add this app's hooks to Claude Code's settings
 //!   claude-buddy-rs --remove-hooks   remove this app's hooks from Claude Code's settings
+//!   claude-buddy-rs --version        print the version
 //!   claude-buddy-rs --cut-sheets <folder> <output folder>   cut sprite sheets into animated PNGs
 
 #![windows_subsystem = "windows"]
@@ -47,6 +48,8 @@ mod store;
 #[cfg(target_os = "macos")]
 mod text_mac;
 mod theme;
+#[cfg(any(windows, target_os = "macos"))]
+mod update;
 mod usage;
 mod webm;
 #[cfg(windows)]
@@ -58,7 +61,7 @@ mod window;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The two that run constantly in the background never show text.
-    if !matches!(args.first().map(String::as_str), Some("hook" | "--scan-usage")) {
+    if !matches!(args.first().map(String::as_str), Some("hook" | "--scan-usage" | "--version")) {
         i18n::apply(&config::Config::load().language);
     }
     match args.first().map(String::as_str) {
@@ -68,6 +71,12 @@ fn main() {
             }
         }
         Some("--scan-usage") => usage::scan_main(),
+        Some("--version") => println!("{}", env!("CARGO_PKG_VERSION")),
+        #[cfg(any(windows, target_os = "macos"))]
+        Some("--after-update") => {
+            update::finish(args.get(1).and_then(|p| p.parse().ok()));
+            window::run();
+        }
         Some("--prepare") => std::process::exit(anim::prepare_main(&args[1..])),
         Some("--cut-sheets") => std::process::exit(sheet::cut_main(&args[1..])),
         Some("--install-hooks") => std::process::exit(hooks_config::cli(true)),

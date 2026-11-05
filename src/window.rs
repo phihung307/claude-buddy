@@ -1626,6 +1626,10 @@ impl App {
 
     fn housekeeping(&mut self) {
         let now = now_ms();
+        if crate::update::ready() && picker::window().is_null() && self.drag.is_none() && crate::update::apply() {
+            unsafe { DestroyWindow(self.hwnd) };
+            return;
+        }
         self.check_fullscreen();
         self.sync_z_order();
         // Also catches turns that never send Stop, like interrupted ones.
@@ -2198,6 +2202,7 @@ pub fn run() {
     }
     let config = Config::load();
     theme::set_translucent(config.translucent);
+    crate::update::start(config.auto_update);
     let shared = Arc::new(Shared::default());
     if let Err(e) = server::start(shared.clone(), config.port) {
         message_box(&crate::tf!("Không mở được cổng {}: {e}\nĐổi \"port\" trong config.json của app.", "Could not open port {}: {e}\nChange \"port\" in the app's config.json.", config.port), MB_OK | MB_ICONERROR);
@@ -2382,6 +2387,7 @@ pub fn settings_view() -> Option<SettingsView> {
         autostart: autostart_enabled(),
         auto_hide: a.config.auto_hide,
         translucent: a.config.translucent,
+        auto_update: a.config.auto_update,
         // A wheel size between the three marks none of them.
         size: SIZE_FACTORS.iter().position(|f| (f - a.config.zoom).abs() < 0.0005).map_or(u8::MAX, |i| i as u8),
         language: match a.config.language.as_str() {
@@ -2400,6 +2406,11 @@ pub fn apply_setting(s: Setting) {
         Setting::Autostart => a.on_command(CMD_AUTOSTART),
         Setting::ResetPosition => a.on_command(CMD_RESET_POS),
         Setting::Folder => a.on_command(CMD_USER_FOLDER),
+        Setting::AutoUpdate => {
+            a.config.auto_update = !a.config.auto_update;
+            a.save_config();
+            crate::update::set_enabled(a.config.auto_update);
+        }
         Setting::AutoHide => {
             a.config.auto_hide = !a.config.auto_hide;
             a.save_config();

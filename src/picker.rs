@@ -630,12 +630,14 @@ impl Picker {
             *y0 += 64.0;
             *y0 - 64.0
         };
-        let toggles: [(&str, &str, &str, bool, Setting); 6] = [
+        let update_note = crate::tf!("Đang ở bản {}. Không cài khi cửa sổ này đang mở", "On version {}. Doesn't install while this window is open", env!("CARGO_PKG_VERSION"));
+        let toggles: [(&str, &str, &str, bool, Setting); 7] = [
             (ICON_PLUG, t("Kết nối Claude Code", "Connect to Claude Code"), if s.hooks { t("Đang nhận trạng thái từ các phiên mới", "Receiving status from new sessions") } else { t("Chưa kết nối: buddy không biết Claude đang làm gì", "Not connected: Buddy can't tell what Claude is doing") }, s.hooks, Setting::Hooks),
             (ICON_HIDE, t("Tự ẩn khi toàn màn hình", "Hide during full screen"), t("Ẩn khi trình chiếu, xem phim hay chơi game, rồi tự hiện lại", "Hides for presentations, movies and games, then comes back"), s.auto_hide, Setting::AutoHide),
             (ICON_SOUND, t("Âm báo", "Sounds"), t("Khi Claude xong việc, cần bạn hoặc gặp lỗi", "When Claude finishes, needs you or hits an error"), s.sound, Setting::Sound),
             (ICON_BELL, if cfg!(windows) { t("Thông báo Windows", "Windows notifications") } else { t("Thông báo", "Notifications") }, if cfg!(windows) { t("Không hiện khi trình chiếu hoặc bật Focus Assist", "Not shown during presentations or Focus Assist") } else { t("Hiện ở góc màn hình khi Claude xong việc hoặc cần bạn", "Shown in the corner of the screen when Claude finishes or needs you") }, s.toasts, Setting::Toasts),
             (ICON_POWER, if cfg!(windows) { t("Khởi động cùng Windows", "Start with Windows") } else { t("Mở khi đăng nhập", "Open at login") }, t("Mở Claude Buddy khi đăng nhập", "Open Claude Buddy when you sign in"), s.autostart, Setting::Autostart),
+            (ICON_POWER, t("Tự động cập nhật", "Update automatically"), &update_note, s.auto_update, Setting::AutoUpdate),
             (ICON_TRANSLUCENT, t("Hiệu ứng trong mờ", "Transparency effects"), t("Nền cửa sổ trong mờ theo Windows; tự tắt khi Windows tắt Transparency effects", "See-through window backgrounds; turns off when Windows turns off transparency effects"), s.translucent, Setting::Translucent),
         ];
         // Pages are solid on a Mac, so there is nothing for this one to change.

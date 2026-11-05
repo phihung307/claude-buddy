@@ -794,6 +794,9 @@ impl App {
 
     fn housekeeping(&mut self) {
         let now = now_ms();
+        if crate::update::ready() && picker::window().is_null() && crate::update::apply() {
+            quit();
+        }
         // The system says nothing to a program like this one when light and dark are switched.
         let was_dark = theme::is_dark();
         theme::reload();
@@ -959,6 +962,7 @@ pub fn settings_view() -> Option<SettingsView> {
         autostart: autostart_enabled(),
         auto_hide: a.config.auto_hide,
         translucent: a.config.translucent,
+        auto_update: a.config.auto_update,
         size: a.config.size,
         language: match a.config.language.as_str() {
             "vi" => 1,
@@ -980,6 +984,11 @@ pub fn apply_setting(s: Setting) {
             a.config.save();
         }
         Setting::Autostart => set_autostart(!autostart_enabled()),
+        Setting::AutoUpdate => {
+            a.config.auto_update = !a.config.auto_update;
+            a.config.save();
+            crate::update::set_enabled(a.config.auto_update);
+        }
         Setting::ResetPosition => {
             let (x, y) = a.default_position();
             a.move_to(x, y);
@@ -1080,6 +1089,7 @@ pub fn run() {
     theme::reload();
     let config = Config::load();
     theme::set_translucent(config.translucent);
+    crate::update::start(config.auto_update);
     let shared = Arc::new(Shared::default());
     if let Err(e) = server::start(shared.clone(), config.port) {
         eprintln!("{}", crate::tf!("Không mở được cổng {}: {e}", "Could not open port {}: {e}", config.port));

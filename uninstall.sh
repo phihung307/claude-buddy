@@ -11,5 +11,5 @@ if [ -x "$EXE" ]; then
     "$EXE" --remove-hooks || true
 fi
 rm -f "$HOME/Library/LaunchAgents/com.taivt0109.claude-buddy.plist"
-rm -rf "$APP"
+rm -rf "$APP" "$HOME/Applications/.claude-buddy-update"
 echo "Claude Buddy was removed."

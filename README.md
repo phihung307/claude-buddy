@@ -51,6 +51,13 @@ command again to update.
 The app isn't signed by Apple, so macOS may refuse to open a copy you downloaded with a browser. The command above
 doesn't run into this.
 
+## Updates
+
+An installed app updates itself: it checks the latest release when it starts and every 30 minutes, downloads it, checks its
+checksum, and restarts into it as soon as the main window is closed. Claude Code sessions keep running through this, and
+each one shows up again at its next event. Turn this off under Settings > Update automatically. Running the install command again also updates. A copy built from source is left
+alone.
+
 ## Uninstall
 
 ### Windows
@@ -215,7 +222,8 @@ in code.
 Environment variables for testing without touching real data: `CLAUDE_BUDDY_RS_HOME` (separate data folder, can run side
 by side), `CLAUDE_CONFIG_DIR` (Claude folder), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`,
 `CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (Windows: keeps animating while locked, for measuring CPU),
-`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: opens the main window at start).
+`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: opens the main window at start), `CLAUDE_BUDDY_RS_UPDATE_URL` with
+`CLAUDE_BUDDY_RS_UPDATE_FROM` (updates from a local test server, pretending to be that version).
 
 ## License
 

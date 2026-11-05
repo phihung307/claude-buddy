@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Folder names too generic to identify a window by title.
-const GENERIC: [&str; 11] = ["src", "source", "repos", "code", "projects", "users", "home", "documents", "desktop", "dev", "work"];
+const GENERIC: [&str; 12] = ["src", "source", "repos", "code", "projects", "users", "home", "documents", "downloads", "desktop", "dev", "work"];
 const SYSTEM_ROOTS: [&str; 5] = ["explorer.exe", "svchost.exe", "services.exe", "wininit.exe", "winlogon.exe"];
 const CONSOLE_HOSTS: [&str; 2] = ["conhost.exe", "openconsole.exe"];
 const TITLE_APPS: [&str; 16] = [
@@ -56,7 +56,8 @@ pub fn processes() -> HashMap<u32, Proc> {
 }
 
 /// Words to look for in window titles, best first: an explicit label for non-CLI sources, then the
-/// last folders of the working directory (editors title their windows with the workspace folder).
+/// folders of the working directory, deepest first. Editors title their windows with the workspace
+/// folder, which can be any number of levels above a session started in a subfolder.
 pub fn title_hints(s: &Session) -> Vec<String> {
     let mut hints = Vec::new();
     if s.source != "cli" {
@@ -65,17 +66,23 @@ pub fn title_hints(s: &Session) -> Vec<String> {
     let cwd = s.cwd.as_deref().unwrap_or("");
     let is_drive = |p: &str| p.len() == 2 && p.ends_with(':');
     let parts: Vec<&str> = cwd.split(['\\', '/']).filter(|p| !p.is_empty() && !is_drive(p)).collect();
-    for p in parts.iter().rev().take(3) {
-        if p.chars().count() > 2 && !GENERIC.contains(&p.to_lowercase().as_str()) && !hints.iter().any(|h| h == p) {
+    let is_user_folder = |i: usize| i == 1 && parts[0].eq_ignore_ascii_case("users");
+    for (i, p) in parts.iter().enumerate().rev() {
+        if p.chars().count() > 2 && !is_user_folder(i) && !GENERIC.contains(&p.to_lowercase().as_str()) && !hints.iter().any(|h| h == p) {
             hints.push(p.to_string());
         }
     }
     hints
 }
 
-/// Earlier hints score higher; 0 = no hint in the title.
+/// Earlier hints score higher; 0 = no hint in the title. A hint that is a whole part of the title
+/// beats one inside a part: in "logs.md - shop - VS Code", the folder is shop, not logs.
 pub fn score(title: &str, hints: &[String]) -> i32 {
     let t = title.to_lowercase();
+    let is_part = |h: &str| t.split(" - ").flat_map(|p| p.split(" — ")).flat_map(|p| p.split(" – ")).any(|p| p.trim() == h);
+    if let Some(i) = hints.iter().position(|h| is_part(&h.to_lowercase())) {
+        return 200 - i as i32;
+    }
     hints.iter().position(|h| t.contains(&h.to_lowercase())).map_or(0, |i| 100 - i as i32)
 }
 
@@ -214,6 +221,30 @@ mod tests {
     }
 
     #[test]
+    fn a_session_deep_in_a_workspace_finds_its_window() {
+        let hints = title_hints(&session("C:\\Projects\\hrm-v2\\.e2e\\copilot\\logs", None, None));
+        let procs: HashMap<u32, Proc> = [(20, proc(1, "code.exe"))].into();
+        let wins = [win(1, 20, "main.rs - claude-buddy-rs - Visual Studio Code"), win(2, 20, "page.ts - hrm-v2 - Visual Studio Code")];
+        assert_eq!(pick_window(&wins, &procs, None, &hints).unwrap().handle, 2);
+    }
+
+    #[test]
+    fn a_file_named_like_the_folder_is_not_the_workspace() {
+        let hints = title_hints(&session("C:\\Projects\\hrm-v2\\logs", None, None));
+        let procs: HashMap<u32, Proc> = [(20, proc(1, "code.exe"))].into();
+        let wins = [win(1, 20, "logs.md - other - Visual Studio Code"), win(2, 20, "page.ts - hrm-v2 - Visual Studio Code")];
+        assert_eq!(pick_window(&wins, &procs, None, &hints).unwrap().handle, 2);
+    }
+
+    #[test]
+    fn windows_of_one_editor_are_told_apart_by_title() {
+        let hints = title_hints(&session("C:\\Projects\\hrm-v2\\logs", None, None));
+        let procs: HashMap<u32, Proc> = [(10, proc(9, "claude.exe")), (9, proc(20, "powershell.exe")), (20, proc(1, "code.exe"))].into();
+        let wins = [win(1, 20, "main.rs - other - Visual Studio Code"), win(2, 20, "page.ts - hrm-v2 - Visual Studio Code")];
+        assert_eq!(pick_window(&wins, &procs, Some(10), &hints).unwrap().handle, 2);
+    }
+
+    #[test]
     fn non_cli_sources_prefer_their_label() {
         let h = title_hints(&session("D:\\acme", Some("portal"), Some("Backend")));
         assert_eq!(h, ["Backend", "acme"]);
@@ -222,7 +253,7 @@ mod tests {
     #[test]
     fn earlier_hints_score_higher_ignoring_case() {
         let hints = vec!["api".to_string(), "billing".to_string()];
-        assert_eq!(score("Billing - VS Code", &hints), 99);
+        assert_eq!(score("Billing - VS Code", &hints), 199);
         assert_eq!(score("my API", &hints), 100);
         assert_eq!(score("Notepad", &hints), 0);
     }

@@ -74,9 +74,11 @@ pub fn run(port: u16) {
     let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = s.set_write_timeout(Some(Duration::from_secs(2)));
 
-    // Only SessionStart needs it, and a process snapshot is the slowest thing this command could do.
-    let is_start = body.windows(12).any(|w| w == b"SessionStart");
-    let pid = if is_start { claude_pid() } else { None };
+    // A process snapshot is the slowest thing this command could do, so not for every tool call. But
+    // not only at SessionStart: a session the app first hears of later, after it restarted, needs it too.
+    let names_event = |e: &[u8]| body.windows(e.len()).any(|w| w == e);
+    let wants_pid = [&b"SessionStart"[..], b"UserPromptSubmit", b"Stop", b"Notification"].into_iter().any(names_event);
+    let pid = if wants_pid { claude_pid() } else { None };
     let mut head = format!(
         "POST /hook HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nX-Buddy-Source: {}\r\nX-Buddy-Label: {}\r\nX-Buddy-Url: {}\r\n",
         body.len(),

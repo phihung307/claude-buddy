@@ -1,6 +1,6 @@
 [package]
 name = "claude-buddy-rs"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Lightweight native desktop companion that shows Claude Code session status"
 license = "MIT"
@@ -23,6 +23,8 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 resvg = { version = "0.49", default-features = false }
 vp9dec = "0.1"
+# Checks a downloaded update against the checksum published with it.
+sha2 = { version = "0.10", default-features = false }
 
 # Mapped files, local time and process priority.
 [target.'cfg(unix)'.dependencies]

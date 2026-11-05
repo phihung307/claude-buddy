@@ -49,6 +49,12 @@ trước và các hook khác giữ nguyên. Chỉ các phiên Claude Code mở s
 
 App chưa được Apple ký, nên macOS có thể từ chối mở bản tải bằng trình duyệt. Dùng lệnh trên thì không gặp cảnh báo này.
 
+## Cập nhật
+
+App đã cài tự cập nhật: kiểm tra bản mới nhất khi khởi động và 30 phút một lần, tải về, kiểm tra mã checksum, rồi khởi động
+lại sang bản mới ngay khi cửa sổ chính đang đóng. Các phiên Claude Code vẫn chạy bình thường, và mỗi phiên hiện lại khi có
+hoạt động tiếp theo. Tắt trong Cài đặt > Tự động cập nhật. Chạy lại lệnh cài cũng cập nhật được. Bản tự build từ mã nguồn không bị đụng tới.
+
 ## Gỡ
 
 ### Windows
@@ -203,7 +209,8 @@ Lệnh thứ hai xuất ảnh PNG của nhân vật và cửa sổ. Lệnh thứ
 Biến môi trường để kiểm tra mà không đụng dữ liệu thật: `CLAUDE_BUDDY_RS_HOME` (thư mục dữ liệu riêng, chạy song song
 được), `CLAUDE_CONFIG_DIR` (thư mục Claude), `CLAUDE_BUDDY_RS_THEME=dark|light`, `CLAUDE_BUDDY_RS_BACKDROP=blur`,
 `CLAUDE_BUDDY_RS_KEEP_ANIMATING=1` (Windows: không tạm dừng khi khoá máy, để đo CPU),
-`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: mở cửa sổ chính khi khởi động).
+`CLAUDE_BUDDY_RS_OPEN_PAGE=0|1|2` (macOS: mở cửa sổ chính khi khởi động), `CLAUDE_BUDDY_RS_UPDATE_URL` cùng
+`CLAUDE_BUDDY_RS_UPDATE_FROM` (cập nhật từ server thử cục bộ, giả làm phiên bản đó).
 
 ## Giấy phép
 

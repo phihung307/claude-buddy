@@ -1,9 +1,24 @@
-# Claude Buddy
+# Claude Buddy: a desktop pet for Claude Code
+
+[![Latest release](https://img.shields.io/github/v/release/taivt0109/claude-buddy)](https://github.com/taivt0109/claude-buddy/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/taivt0109/claude-buddy/total)](https://github.com/taivt0109/claude-buddy/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)](#install)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **English** | [Tiếng Việt](README.vi.md)
 
 A small character that floats on your desktop and shows what your Claude Code sessions are doing: working, waiting for
 you, done, or failed. For Windows 10/11 and macOS 11 or later.
+
+Run several Claude Code sessions at once and stop checking each terminal to see if one is waiting for you. Claude Buddy
+is a desktop companion and status notifier for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Anthropic's
+AI coding agent: it listens to Claude Code hooks, tells you when a session needs your input or has finished, and takes you
+to the right terminal or IDE window (VS Code, Cursor, Windows Terminal and others) in one click. It is a small native Rust
+app, not Electron.
+
+[Install](#install) · [Create a character](#creating-a-character-with-codex) · [Share characters](#sharing-characters) ·
+[Local API](#local-api) · [Build from source](#build-from-source)
 
 ## Features
 

@@ -1,9 +1,20 @@
-# Claude Buddy
+# Claude Buddy: thú cưng trên màn hình cho Claude Code
+
+[![Latest release](https://img.shields.io/github/v/release/taivt0109/claude-buddy)](https://github.com/taivt0109/claude-buddy/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/taivt0109/claude-buddy/total)](https://github.com/taivt0109/claude-buddy/releases)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)](#cài-đặt)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 [English](README.md) | **Tiếng Việt**
 
 Nhân vật nhỏ nổi trên màn hình, cho biết các phiên Claude Code đang làm gì: đang chạy, chờ bạn, đã xong hay bị lỗi. Chạy
 trên Windows 10/11 và macOS 11 trở lên.
+
+Chạy nhiều phiên Claude Code cùng lúc mà không phải mở từng terminal xem phiên nào đang chờ mình. Claude Buddy theo dõi
+hook của [Claude Code](https://docs.anthropic.com/en/docs/claude-code), báo khi một phiên cần bạn trả lời hoặc đã xong, và
+bấm một lần là tới đúng cửa sổ terminal hay IDE (VS Code, Cursor, Windows Terminal…). Đây là app native viết bằng Rust,
+nhẹ, không dùng Electron.
 
 ## Tính năng
 

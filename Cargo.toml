@@ -5,6 +5,10 @@ edition = "2021"
 description = "Lightweight native desktop companion that shows Claude Code session status"
 license = "MIT"
 repository = "https://github.com/taivt0109/claude-buddy"
+homepage = "https://github.com/taivt0109/claude-buddy"
+readme = "README.md"
+keywords = ["claude-code", "claude", "desktop-pet", "notifications", "tray"]
+categories = ["development-tools", "gui"]
 
 [build-dependencies]
 embed-resource = "3"

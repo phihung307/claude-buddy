@@ -630,16 +630,22 @@ impl Picker {
             *y0 += 64.0;
             *y0 - 64.0
         };
-        let toggles: [(&str, &str, &str, bool, Setting); 6] = [
+        let keys = s.skill_keys.map(|k| if k == 0 { "-".to_string() } else { (k as char).to_string() }).join("/");
+        let skills = crate::tf!(
+            "Phân thân khi làm lâu, dịch chuyển khi xong hoặc cần bạn. Phím Ctrl+{keys}, đổi trong config.json",
+            "Clones on long work, a teleport when done or needed. Keys Ctrl+{keys}, set in config.json"
+        );
+        let toggles: [(&str, &str, &str, bool, Setting); 7] = [
             (ICON_PLUG, t("Kết nối Claude Code", "Connect to Claude Code"), if s.hooks { t("Đang nhận trạng thái từ các phiên mới", "Receiving status from new sessions") } else { t("Chưa kết nối: buddy không biết Claude đang làm gì", "Not connected: Buddy can't tell what Claude is doing") }, s.hooks, Setting::Hooks),
             (ICON_HIDE, t("Tự ẩn khi toàn màn hình", "Hide during full screen"), t("Ẩn khi trình chiếu, xem phim hay chơi game, rồi tự hiện lại", "Hides for presentations, movies and games, then comes back"), s.auto_hide, Setting::AutoHide),
             (ICON_SOUND, t("Âm báo", "Sounds"), t("Khi Claude xong việc, cần bạn hoặc gặp lỗi", "When Claude finishes, needs you or hits an error"), s.sound, Setting::Sound),
             (ICON_BELL, if cfg!(windows) { t("Thông báo Windows", "Windows notifications") } else { t("Thông báo", "Notifications") }, if cfg!(windows) { t("Không hiện khi trình chiếu hoặc bật Focus Assist", "Not shown during presentations or Focus Assist") } else { t("Hiện ở góc màn hình khi Claude xong việc hoặc cần bạn", "Shown in the corner of the screen when Claude finishes or needs you") }, s.toasts, Setting::Toasts),
             (ICON_POWER, if cfg!(windows) { t("Khởi động cùng Windows", "Start with Windows") } else { t("Mở khi đăng nhập", "Open at login") }, t("Mở Claude Buddy khi đăng nhập", "Open Claude Buddy when you sign in"), s.autostart, Setting::Autostart),
             (ICON_TRANSLUCENT, t("Hiệu ứng trong mờ", "Transparency effects"), t("Nền cửa sổ trong mờ theo Windows; tự tắt khi Windows tắt Transparency effects", "See-through window backgrounds; turns off when Windows turns off transparency effects"), s.translucent, Setting::Translucent),
+            (ICON_GENERATE, t("Tự dùng skill theo phiên", "Skills follow the sessions"), &skills, s.auto_skills, Setting::AutoSkills),
         ];
-        // Pages are solid on a Mac, so there is nothing for this one to change.
-        for (icon, title, desc, on, setting) in toggles.into_iter().filter(|x| cfg!(windows) || x.4 != Setting::Translucent) {
+        // Pages are solid on a Mac, so there is nothing for this one to change; nor skills there yet.
+        for (icon, title, desc, on, setting) in toggles.into_iter().filter(|x| cfg!(windows) || !matches!(x.4, Setting::Translucent | Setting::AutoSkills)) {
             let ry = row(g, icon, title, desc, &mut y);
             g.toggle(x + w - 62.0, ry + 20.0, on, Action::Set(setting), &hover, hits);
         }
@@ -649,7 +655,7 @@ impl Picker {
         for (i, l) in labels.iter().enumerate() {
             cx = g.chip(cx, ry + 16.0, l, s.language == i as u8, Action::Set(Setting::Language(i as u8)), &hover, hits) + 4.0;
         }
-        let ry = row(g, ICON_RESIZE, t("Kích thước nhân vật", "Character size"), t("Hoặc lăn chuột trên nhân vật; trỏ vào nhân vật: Ctrl+Q/W/R (ở nơi khác thêm Alt)", "Or scroll on the character; pointing at it: Ctrl+Q/W/R (elsewhere add Alt)"), &mut y);
+        let ry = row(g, ICON_RESIZE, t("Kích thước nhân vật", "Character size"), t("Hoặc lăn chuột trên nhân vật", "Or scroll on the character"), &mut y);
         let labels = [t("Nhỏ", "Small"), t("Vừa", "Medium"), t("Lớn", "Large")];
         let mut cx = x + w - 16.0 - labels.iter().map(|l| g.chip_w(l) + 4.0).sum::<f32>();
         for (i, l) in labels.iter().enumerate() {
